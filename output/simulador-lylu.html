@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simulador Tela Lylu</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#2b2b33; min-height:100vh; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; font-family:'Segoe UI', sans-serif; gap:20px; padding:20px; }
+  h1 { color:#e0e0e6; font-size:16px; font-weight:400; opacity:.6; text-align:center; }
+  .tela { width:480px; height:480px; border:8px solid #111; border-radius:14px;
+    overflow:hidden; position:relative; box-shadow:0 12px 40px rgba(0,0,0,.5); font-family:'Courier New', monospace; }
+  .titulo { height:52px; background:#1a1a2e; color:#fff; display:flex; align-items:center;
+    justify-content:center; font-size:22px; font-weight:bold; letter-spacing:2px; border-bottom:3px solid #4a4a6a; }
+  .corpo { display:flex; height:428px; }
+  .lado-lylu { width:210px; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; padding:10px; border-right:3px solid rgba(255,255,255,.15); position:relative;
+    transition:background .25s; }
+  .lylu-img { width:150px; height:150px; image-rendering:pixelated; }
+  .nome-humor { margin-top:8px; font-size:15px; font-weight:bold; text-align:center; }
+  .sub-humor { font-size:11px; text-align:center; margin-top:2px; opacity:.85; }
+  .lado-tarefas { flex:1; padding:14px 12px; color:#e8e8ee; display:flex; flex-direction:column; }
+  .lado-tarefas h2 { font-size:14px; margin-bottom:8px; text-decoration:underline; }
+  .tarefa { display:flex; align-items:center; gap:7px; font-size:14px; margin-bottom:7px; }
+  .check { width:16px; height:16px; border:2px solid currentColor; display:inline-flex;
+    align-items:center; justify-content:center; font-size:12px; font-weight:bold; flex-shrink:0; }
+  .feita { color:#7ed957; }
+  .feita .check::after { content:"x"; }
+  .pendente { color:#e8e8ee; }
+  .controles { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; max-width:520px; }
+  .controles button { padding:8px 14px; border:none; border-radius:8px; cursor:pointer;
+    background:#4a4a6a; color:#fff; font-size:13px; transition:.15s; }
+  .controles button:hover { background:#6a6a9a; transform:translateY(-2px); }
+  .controles button.ativo { background:#7ed957; color:#111; font-weight:bold; }
+  .dica { color:#888; font-size:12px; text-align:center; max-width:480px; line-height:1.5; }
+</style>
+</head>
+<body>
+  <h1>Simulacao da telinha 480x480 do ESP32 (Lylu virada p/ as tarefas)</h1>
+  <div class="tela">
+    <div class="titulo">STATUS DO DIA DE LYLU</div>
+    <div class="corpo">
+      <div class="lado-lylu" id="ladoLylu">
+        <img class="lylu-img" id="lyluImg" src="" alt="Lylu">
+        <div class="nome-humor" id="nomeHumor"></div>
+        <div class="sub-humor" id="subHumor"></div>
+      </div>
+      <div class="lado-tarefas">
+        <h2>Plano do Dia:</h2>
+        <div id="listaTarefas"></div>
+      </div>
+    </div>
+  </div>
+  <div class="controles" id="controles"></div>
+  <p class="dica">Clica nos botoes pra simular cada humor.<br>No ESP32 real, quem escolhe o humor sera o n8n (via Supabase).</p>
+<script>
+  // Cada humor aponta pro GIF ja gerado em output/gifs-corrigidos/
+  const HUMORES = {
+    animada:     { gif:"gifs-corrigidos/lylu-animada.gif",     nome:"ANIMADA",     sub:"bora que hoje rende!",        bg:"#1f3d2b", fundoTela:"#16281d" },
+    comemorando: { gif:"gifs-corrigidos/lylu-comemorando.gif", nome:"COMEMORANDO", sub:"tudo feito, arrasou!",        bg:"#3d3512", fundoTela:"#2a250d" },
+    brincalhona: { gif:"gifs-corrigidos/lylu-brincalhona.gif", nome:"BRINCALHONA", sub:"da tempo de um joguinho...",  bg:"#33234a", fundoTela:"#231733" },
+    cuidadora:   { gif:"gifs-corrigidos/lylu-cuidadora.gif",   nome:"CUIDADORA",   sub:"ja bebeu agua hoje?",         bg:"#123a3d", fundoTela:"#0d2a2c" },
+    descansando: { gif:"gifs-corrigidos/lylu-descansando.gif", nome:"DESCANSANDO", sub:"pausa merecida",              bg:"#1e2440", fundoTela:"#151a2e" },
+    entediada:   { gif:"gifs-corrigidos/lylu-entediada.gif",   nome:"ENTEDIADA",   sub:"cade as tarefas?",            bg:"#2e2e36", fundoTela:"#212127" },
+    alertando:   { gif:"gifs-corrigidos/lylu-alertando-corrigido-v3.gif", nome:"ALERTANDO", sub:"tem coisa atrasada!", bg:"#4a2412", fundoTela:"#33190c" },
+    julgadora:   { gif:"gifs-corrigidos/lylu-julgadora.gif",   nome:"JULGADORA",   sub:"serio que nao fez nada?",     bg:"#42121f", fundoTela:"#2e0d16" }
+  };
+
+  // Tarefas de exemplo - no ESP32 real isso vem do Supabase
+  const TAREFAS = [
+    { texto:"Tomar remedio",     feita:true  },
+    { texto:"Responder e-mails", feita:true  },
+    { texto:"Beber 2L de agua",  feita:false },
+    { texto:"Caminhada 20min",   feita:false },
+    { texto:"Estudar ESP32",     feita:false }
+  ];
+
+  const ladoLylu   = document.getElementById("ladoLylu");
+  const lyluImg    = document.getElementById("lyluImg");
+  const nomeHumor  = document.getElementById("nomeHumor");
+  const subHumor   = document.getElementById("subHumor");
+  const controles  = document.getElementById("controles");
+  const lista      = document.getElementById("listaTarefas");
+
+  function montarTarefas() {
+    lista.innerHTML = TAREFAS.map(t =>
+      '<div class="tarefa ' + (t.feita ? 'feita' : 'pendente') + '">' +
+        '<span class="check"></span><span>' + t.texto + '</span>' +
+      '</div>'
+    ).join("");
+  }
+
+  function mostrar(chave) {
+    const h = HUMORES[chave];
+    // cache-buster reinicia a animacao do GIF do zero a cada troca
+    lyluImg.src = h.gif + "?r=" + performance.now();
+    nomeHumor.textContent = h.nome;
+    subHumor.textContent  = h.sub;
+    ladoLylu.style.background = h.bg;
+    nomeHumor.style.color = "#fff";
+    document.querySelector(".corpo").style.background = h.fundoTela;
+    [...controles.children].forEach(b =>
+      b.classList.toggle("ativo", b.dataset.humor === chave));
+  }
+
+  Object.keys(HUMORES).forEach(chave => {
+    const b = document.createElement("button");
+    b.textContent = HUMORES[chave].nome;
+    b.dataset.humor = chave;
+    b.onclick = () => mostrar(chave);
+    controles.appendChild(b);
+  });
+
+  montarTarefas();
+  mostrar("animada");
+</script>
+</body>
+</html>
