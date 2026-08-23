@@ -35,22 +35,71 @@ porque sabe recuar quando precisa. Sem o recuo, cutucar vira julgar.
 3. **A relação cresce com o tempo.** O diário, a memória do agente, o histórico
    da semana — é isso que a torna *dela* e não um gadget genérico.
 
-### Perguntas em aberto (decisão da Noemi)
+### ✅ DECIDIDO: a Lylu tem opinião própria
 
-- **A Lylu vive dentro do Todoist ou tem opinião própria?** Hoje é leitora fiel.
-  Poderia ter iniciativa: sugerir pausa depois de 3h direto, notar que uma tarefa
-  foi adiada 5 vezes e perguntar se não é hora de largar, lembrar de água. Mais
-  viva — e também mais intrusiva. Qual dose?
-- **É objeto de mesa de trabalho ou de casa?** Se escrivaninha, o Foco é a alma
-  dela. Se sala/cabeceira, o Relógio e a Casa importam mais e as tarefas viram
-  coadjuvantes.
+Ela **não** é só uma leitora fiel do Todoist. Tem iniciativa: percebe padrões,
+comenta, sugere. É o que a separa de um painel bonito.
+
+**A regra que impede isso de virar chatice:** iniciativa também passa pelo filtro
+*acolhe ou cobra?*. Na prática, três travas:
+
+1. **Ela propõe, nunca insiste.** Falou uma vez, deixou quieto. Se você ignorar,
+   ela não repete no mesmo dia.
+2. **Uma de cada vez.** Nunca empilhar dois palpites. Se tem dois, escolhe o mais
+   acolhedor.
+3. **Ela pode estar errada, e tudo bem** — desde que fale como quem chuta
+   ("acho que…", "posso tá enganada, mas…"). Assistente que erra afirmando é
+   irritante; amiga que arrisca um palpite é gostoso.
+4. **No modo dia difícil, só sobra o que acolhe.** As cutucadas desligam.
+
+#### Iniciativas propostas (ordem de valor)
+
+| O que ela nota | O que ela fala | Por quê |
+|---|---|---|
+| Tarefa parada há dias | *"Essa tá aí desde segunda. Quer deixar pra lá? Tá tudo bem."* | **A mais importante.** Nenhum app de produtividade dá permissão pra desistir sem culpa — e é exatamente disso que quem tem TDAH precisa |
+| Dia com coisas feitas | *"Você fez 6 coisas hoje. Sei que não parece, mas fez."* | TDAH tende a não registrar o que foi concluído; ela devolve isso |
+| Muito tempo sem pausa | *"Tá há 2h aí. Bebe uma água?"* | Cuidado básico, casa com a emoção *cuidadora* |
+| Vários dias corridos seguidos | *"Terceiro dia puxado seguido. Tá tudo bem por aí?"* | Abre espaço pro `/diaruim` sem você ter que pedir |
+| Lista grande demais | *"12 tarefas pra hoje. Ambiciosa, hein 👀"* | Cutucada leve — desliga no dia difícil |
+
+#### O que ela NUNCA faz
+- Contar sequência ("você quebrou 5 dias seguidos!") — é culpa disfarçada de jogo
+- Comparar com outras pessoas
+- Falar em horário fixo — vira ruído e ela deixa de ser notada
+
+#### Onde a iniciativa mora
+- **No n8n (o cérebro):** padrões ao longo de dias. Ele já tem o agente com
+  memória e o `lylu_diario` desde julho/2026 — dá pra notar tendências hoje.
+- **Na placa:** o imediato — tempo sem interação, tempo na tela de foco, hora do dia.
+- **Dado que falta:** pra notar "tarefa adiada 5 vezes", precisa guardar histórico
+  por tarefa (hoje o `lylu_diario` só guarda contagens do dia).
+
+### ✅ DECIDIDO: ela é uma coisa da mesa de trabalho
+
+Fica na escrivaninha, no campo de visão de quem trabalha. Consequências diretas:
+
+- **A tela de Foco é a alma dela**, não um extra. Sobe pro topo da ordem de
+  construção. É onde ela passa a maior parte do tempo útil.
+- **A tela padrão é a de trabalho** (Foco ou Tarefas). Casa e Relógio são o
+  respiro entre as coisas, não o estado principal.
+- **A iniciativa dela é sobre a sessão de trabalho** — tempo sem pausa, tarefa
+  travada, "você já fez bastante hoje" — e não sobre a casa/rotina doméstica.
+- **Nada de som alto nem movimento chamativo demais** enquanto você trabalha:
+  ela divide a mesa com o seu foco, não disputa com ele. Quando o alto-falante
+  chegar, sons discretos e a possibilidade de silenciar durante o Pomodoro.
+- Reforça a decisão de **não** fazer clima/notícias: mesa de trabalho já tem
+  monitor pra isso.
 
 ---
 
 ## 📱 As telas
 
-Ordem de construção sugerida: **Casa → Relógio → Foco → Semana**
-(Casa e Relógio são quase de graça na arquitetura atual; Foco é o que mais muda o dia.)
+Ordem de construção: **Foco → Tarefas (já existe) → Casa → Relógio → Semana → Ajustes**
+
+Como ela é objeto de **mesa de trabalho**, o Foco virou a tela principal e subiu
+pro topo — apesar de ser mais trabalhosa que Casa e Relógio, é onde ela passa o
+tempo útil. Casa e Relógio continuam importando como respiro, e são baratas de
+construir na arquitetura atual.
 
 ### 🏠 1. A casa da Lylu
 Ela só **vive**: anda, boceja, brinca, cochila. Nenhuma tarefa, nenhuma cobrança.
