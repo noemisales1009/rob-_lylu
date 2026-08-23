@@ -73,6 +73,44 @@ Fez a missão → **o dia foi cumprido.** Ponto final. O resto é bônus.
   de tarefas. Uma semana com 5 missões batidas é uma semana ótima, mesmo com
   30 bônus intocados.
 
+### 🎮 Juntar com o RPG "Próximo Nível" (proposta — falta decidir o prêmio)
+
+A Noemi tinha criado o repo `proximo_nivel`: um RPG de produtividade em React
+(missões com XP, moedas, loja de prêmios, hábitos, níveis). **O projeto não foi
+pra frente e o banco nunca chegou a existir** — ou seja, nada pra migrar.
+
+**Provável causa da morte:** era um site que exigia lembrar de abrir. Gamificação
+que precisa de disciplina pra ser acessada morre — pede justamente o que deveria
+estar ajudando. Com a Lylu na mesa, ela fica visível o dia inteiro de graça.
+
+**Reframe:** não juntar os dois projetos — trazer as *mecânicas* pro sistema da
+Lylu, que já tem Supabase, Todoist (captura), n8n (cérebro), Telegram (conversa)
+e a presença física.
+
+```
+P1 no Todoist  →  missão do dia
+completou      →  n8n dá XP + moedas  →  Lylu comemora na mesa 🎉
+juntou moedas  →  troca por prêmio de verdade
+```
+
+Sem app novo: 2 tabelas no Supabase existente (`lylu_progresso` com xp/moedas,
+`lylu_premios`), um trecho no n8n, uma tela na Lylu e comandos no Telegram
+(`/loja`, `/resgatar`).
+
+**Regras herdadas do conceito:**
+- **Só ganha, nunca perde.** Cortar o "dano por mau hábito" do RPG antigo — se a
+  moeda pode ser perdida, erro vira dívida, e aqui não existe dívida. Mau hábito
+  só não dá moeda; não tira.
+- **Nível fica pra depois.** Moeda + prêmio já é o motor; nível é enfeite.
+- **O prêmio tem que ser real e escolhido por ela** (episódio sem culpa, doce,
+  tarde livre, um livro) — é o que faz a moeda valer algo.
+
+**⏳ Pendente:** definir quais prêmios. Se não houver prêmio que mova de verdade,
+abandonar a moeda e investir só na presença e na comemoração da Lylu.
+
+**Ordem:** terminar a Lylu primeiro (a missão do dia já está no plano); a
+gamificação encaixa por cima depois, sem refazer nada.
+
 ### Três princípios que saem daí
 
 1. **Ela precisa ter vida própria.** Se ela só existe quando há tarefa pendente,
