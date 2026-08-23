@@ -40,13 +40,40 @@ porque sabe recuar quando precisa. Sem o recuo, cutucar vira julgar.
 Ela **não** é só uma leitora fiel do Todoist. Tem iniciativa: percebe padrões,
 comenta, sugere. É o que a separa de um painel bonito.
 
-**A regra que impede isso de virar chatice:** iniciativa também passa pelo filtro
-*acolhe ou cobra?*. Na prática, três travas:
+> ⚠️ **DISTINÇÃO CRÍTICA — não confundir as duas coisas:**
+>
+> | | **Lembrar das atividades** | **Palpite / opinião** |
+> |---|---|---|
+> | O que é | A função principal dela | Iniciativa, comentário |
+> | Frequência | **SEMPRE. Sem exceção.** | Uma vez, sem insistir |
+> | Pode falhar? | **Nunca** | Sim, tudo bem |
+> | Desliga no dia difícil? | Não (muda o *tom*, não some) | As cutucadas sim |
+>
+> Se ela às vezes esquecer de lembrar, ela deixa de ser confiável — e aí a pessoa
+> volta a ter que guardar tudo na cabeça, que é exatamente o que ela veio resolver.
+> **Lembrar não é opinião dela, é o trabalho dela.**
 
-1. **Ela propõe, nunca insiste.** Falou uma vez, deixou quieto. Se você ignorar,
-   ela não repete no mesmo dia.
-2. **Uma de cada vez.** Nunca empilhar dois palpites. Se tem dois, escolhe o mais
-   acolhedor.
+#### Como lembrar sempre, sem virar chatice
+
+A saída está no princípio 2 (*o poder dela é ser vista, não usada*): o lembrete é
+**ambiente e permanente**, não uma interrupção repetida.
+
+1. **A lista fica sempre visível** — não precisa cutucar o que já está à vista.
+2. **A carinha dela é o lembrete que atravessa todas as telas.** O humor já reflete
+   o estado das tarefas: *alertando* = tem coisa atrasada, *julgadora* = tem muita.
+   Então, mesmo na tela de Foco ou do Relógio, olhar pra ela já te diz como está o
+   dia — sem texto, sem alarme, sem interromper.
+   → **Consequência de projeto:** o estado das tarefas não pode ficar preso na tela
+   de Tarefas. Ele viaja com ela.
+3. **Só o urgente interrompe de verdade** (compromisso com hora, prazo estourando):
+   aí sim ela chama atenção ativamente, com a emoção *alertando*.
+4. **No dia difícil ela continua lembrando** — muda o tom, não o fato.
+   *"Tem duas coisas ali pra quando você puder. Sem pressa."*
+
+#### As travas (valem para os PALPITES, não para os lembretes)
+
+1. **Ela propõe, nunca insiste.** Falou uma vez, deixou quieto.
+2. **Uma de cada vez.** Nunca empilhar dois palpites; escolhe o mais acolhedor.
 3. **Ela pode estar errada, e tudo bem** — desde que fale como quem chuta
    ("acho que…", "posso tá enganada, mas…"). Assistente que erra afirmando é
    irritante; amiga que arrisca um palpite é gostoso.
@@ -159,12 +186,16 @@ A mesma Lylu, com contexto. É o que dá alma ao sistema de telas.
 
 | Tela | O que ela faz |
 |---|---|
-| Casa | anda solta, brinca, cochila, boceja |
-| Relógio | brinca (tem tempo livre) |
 | Foco | fica quietinha do lado, trabalhando junto |
 | Tarefas | aponta a lista |
+| Casa | anda solta, brinca, cochila, boceja |
+| Relógio | brinca (tem tempo livre) |
 | Semana | comemora ou consola, conforme o resultado |
 | Ajustes | curiosa, esperando a conexão |
+
+**Mas a emoção dela nunca é só decorativa:** em qualquer tela, o humor reflete o
+estado real das tarefas (*alertando* = tem atrasada). É assim que ela lembra das
+atividades mesmo quando você não está na tela de Tarefas.
 
 Na prática o código já sorteia entre andar e parar pra fazer algo — basta mudar
 o **peso** das escolhas por tela.
