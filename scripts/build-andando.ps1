@@ -333,6 +333,7 @@ public static class WalkingSpriteBuilder
             List<Bitmap> poses = new List<Bitmap>();
             List<Bounds> characterBounds = new List<Bounds>();
             List<int> heights = new List<int>();
+            int widestPose = 1;
 
             for (int row = 0; row < 3; row++)
             {
@@ -347,12 +348,14 @@ public static class WalkingSpriteBuilder
                     poses.Add(pose);
                     characterBounds.Add(character);
                     heights.Add(character.Height);
+                    widestPose = Math.Max(widestPose, character.Width);
                 }
             }
 
             heights.Sort();
             float medianHeight = (heights[5] + heights[6]) / 2f;
             float scale = Math.Min(1.24f, 376f / medianHeight);
+            scale = Math.Min(scale, 420f / widestPose);
             List<Bitmap> frames = new List<Bitmap>();
             string[] paths = new string[12];
             try

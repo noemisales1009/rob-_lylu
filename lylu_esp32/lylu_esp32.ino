@@ -1,4 +1,4 @@
-// ============================================================
+﻿// ============================================================
 //  LYLU - Tela de status no ESP32-4848S040C (Guition 480x480)
 //
 //  A tela inteira e a casa da Lylu: ela anda em quatro direcoes,
@@ -161,7 +161,27 @@ bool      pensandoOk = false;
 bool      apontandoOk = false;
 
 enum DirecaoLylu { DIREITA = 0, ESQUERDA = 1, BAIXO = 2, CIMA = 3 };
-enum AcaoLylu { ANDANDO, MOSTRANDO_EMOCAO, PENSANDO, APONTANDO_LISTA };
+enum AcaoLylu { ANDANDO, MOSTRANDO_EMOCAO, PENSANDO, APONTANDO_LISTA, FAZENDO_ALGO };
+
+// Coisas que a Lylu faz quando para. Nao cabem todas na memoria ao
+// mesmo tempo (8 x 540 KB), entao uma e carregada do disco na hora.
+const char *ACOES_EXTRAS[] = {
+  "dancando", "bocejando", "brava", "chorando",
+  "dormindo", "lendo", "tomandoagua", "tomandocafe"
+};
+const int TOTAL_ACOES_EXTRAS = sizeof(ACOES_EXTRAS) / sizeof(ACOES_EXTRAS[0]);
+
+// IMPORTANTE: nesta placa, ler o disco DURANTE a animacao corrompe a tela
+// (a imagem quebra e treme, porque o video e o disco disputam a memoria).
+// Por isso todas as acoes que couberem sao carregadas UMA VEZ no inicio e
+// ficam na memoria. Depois disso o disco nunca mais e tocado.
+uint16_t *framesExtra[TOTAL_ACOES_EXTRAS] = { nullptr };
+bool  extraDisponivel[TOTAL_ACOES_EXTRAS] = { false };
+int   totalExtrasNaMemoria = 0;
+int   extraAtual = -1;     // qual acao esta sendo mostrada agora
+bool  extraOk = false;
+
+bool carregarAnimacao(const char *prefixo, uint16_t *destinoFrames);  // definida abaixo
 
 const char *PREFIXOS_DIRECAO[TOTAL_DIRECOES] = {
   "anddireita", "andesquerda", "andbaixo", "andcima"
@@ -239,18 +259,29 @@ void escolherNovoDestino() {
 void iniciarAcaoParada(unsigned long agora) {
   int escolha = random(0, 100);
 
-  // Na maior parte das paradas ela mostra o humor vindo do Supabase.
-  // De vez em quando pensa; perto do lado esquerdo, pode apontar a lista.
-  if (pensandoOk && escolha < 25) {
+  // Na maior parte das paradas ela faz alguma coisa (dancar, ler, tomar
+  // agua...); as vezes pensa; perto da lista, aponta; senao mostra o humor.
+  // As acoes ja estao todas na memoria: escolhe uma e pronto, sem disco.
+  if (totalExtrasNaMemoria > 0 && escolha < 45) {
+    int n = random(0, totalExtrasNaMemoria);
+    for (int i = 0; i < TOTAL_ACOES_EXTRAS; i++) {
+      if (extraDisponivel[i] && n-- == 0) { extraAtual = i; break; }
+    }
+    acaoAtual = FAZENDO_ALGO;
+    extraOk = true;
+    Serial.printf("Lylu esta %s\n", ACOES_EXTRAS[extraAtual]);
+  } else if (pensandoOk && escolha < 60) {
     acaoAtual = PENSANDO;
-  } else if (apontandoOk && lyluX <= 120 && escolha < 40) {
+  } else if (apontandoOk && lyluX <= 120 && escolha < 75) {
     acaoAtual = APONTANDO_LISTA;
   } else {
     acaoAtual = MOSTRANDO_EMOCAO;
   }
 
   frameAtual = 0;
-  fimDaAcao = agora + MS_PAUSA_EMOCAO;
+  // acoes tem mais graca se durarem um pouco mais
+  fimDaAcao = agora + (acaoAtual == FAZENDO_ALGO ? MS_PAUSA_EMOCAO * 2
+                                                 : MS_PAUSA_EMOCAO);
 }
 
 void mudarDirecao(int novaDirecao) {
@@ -319,6 +350,8 @@ void desenharProximoFrameMovel(unsigned long agora) {
     animacao = framesAndando[direcaoAtual];
   } else if (acaoAtual == PENSANDO && pensandoOk) {
     animacao = framesPensando;
+  } else if (acaoAtual == FAZENDO_ALGO && extraOk) {
+    animacao = (extraAtual >= 0) ? framesExtra[extraAtual] : nullptr;
   } else if (acaoAtual == APONTANDO_LISTA && apontandoOk) {
     animacao = framesApontando;
   } else if (framesOk) {
@@ -460,6 +493,7 @@ int humorPorNome(const char *nome) {
 // ============================================================
 //  Carregamento dos frames
 // ============================================================
+// So e chamada durante a inicializacao, com a tela ainda parada.
 bool carregarAnimacao(const char *prefixo, uint16_t *destinoFrames) {
   if (!destinoFrames) return false;
   char caminho[40];
@@ -708,6 +742,11 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n=== Lylu ESP32 ===");
+  // O amortecedor de video mora na RAM interna, que e pouca. Se faltar,
+  // ele falha silenciosamente e a tela volta a tremer/rolar.
+  Serial.printf("RAM interna livre: %u KB, PSRAM livre: %u KB\n",
+                (unsigned)(ESP.getFreeHeap() / 1024),
+                (unsigned)(ESP.getFreePsram() / 1024));
 
   gfx->begin();
 
@@ -736,6 +775,7 @@ void setup() {
   }
   framesPensando = (uint16_t *)ps_malloc(bytesAnimacao);
   framesApontando = (uint16_t *)ps_malloc(bytesAnimacao);
+
   // O fundo e o rascunho ficam na memoria INTERNA (rapida): e ela que faz o
   // desenho sair de uma vez so, sem brigar com o video pela PSRAM.
   fundoLylu  = (uint16_t *)heap_caps_malloc((size_t)FRAME_PX * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -776,6 +816,42 @@ void setup() {
   if (!caminhadasOk) Serial.println("AVISO: falta alguma caminhada direcional no LittleFS");
   if (!pensandoOk)   Serial.println("AVISO: faltam pensando00.bin ... pensando11.bin");
   if (!apontandoOk)  Serial.println("AVISO: faltam apontandolista00.bin ... apontandolista11.bin");
+
+  // ---- Carrega as acoes extras AGORA, todas de uma vez ----
+  // Enquanto isso a tela ainda nao esta animando, entao o disco pode ser
+  // usado a vontade. Depois daqui, nunca mais tocamos nele.
+  // Guardamos 1,2 MB de folga para o WiFi e o resto do sistema.
+  const size_t FOLGA_PSRAM = 1200000;
+  size_t bytesAnim = (size_t)NUM_FRAMES * FRAME_PX * 2;
+
+  // ordem sorteada: se nao couberem todas, as escolhidas variam a cada boot
+  int ordem[TOTAL_ACOES_EXTRAS];
+  for (int i = 0; i < TOTAL_ACOES_EXTRAS; i++) ordem[i] = i;
+  for (int i = TOTAL_ACOES_EXTRAS - 1; i > 0; i--) {
+    int j = random(0, i + 1);
+    int tmp = ordem[i]; ordem[i] = ordem[j]; ordem[j] = tmp;
+  }
+
+  for (int k = 0; k < TOTAL_ACOES_EXTRAS; k++) {
+    if (ESP.getFreePsram() < bytesAnim + FOLGA_PSRAM) {
+      Serial.println("Memoria cheia; as demais acoes ficam de fora.");
+      break;
+    }
+    int i = ordem[k];
+    uint16_t *buf = (uint16_t *)ps_malloc(bytesAnim);
+    if (!buf) break;
+    if (carregarAnimacao(ACOES_EXTRAS[i], buf)) {
+      framesExtra[i] = buf;
+      extraDisponivel[i] = true;
+      totalExtrasNaMemoria++;
+      Serial.printf("  carregada: %s\n", ACOES_EXTRAS[i]);
+    } else {
+      free(buf);
+    }
+  }
+  Serial.printf("Acoes na memoria: %d de %d | PSRAM livre: %u KB\n",
+                totalExtrasNaMemoria, TOTAL_ACOES_EXTRAS,
+                (unsigned)(ESP.getFreePsram() / 1024));
 
   randomSeed(esp_random());
   escolherNovoDestino();

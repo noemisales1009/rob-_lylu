@@ -33,7 +33,7 @@
 
 // Se as cores sairem trocadas/negativas nesta tela, alterne 0/1 aqui
 // (na 4848 era 1; paineis NV3041A normalmente ficam bem com 0).
-#define TELA_INVERTE_CORES 0
+#define TELA_INVERTE_CORES 1
 
 // ---------- Display (JC4827W543: NV3041A via QSPI) ----------
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
