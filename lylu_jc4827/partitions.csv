@@ -1,0 +1,15 @@
+# Particoes para a Lylu - ESP32-4848S040C (16 MB de flash)
+#
+# Por que este arquivo existe:
+# as opcoes prontas de 16MB do menu do Arduino criam uma particao FATFS,
+# e o plugin de upload do LittleFS so aceita SubType "spiffs" ou "littlefs".
+# Este arquivo fica na pasta do sketch e tem prioridade sobre o menu.
+#
+# Sobra ~11,8 MB para os frames (hoje usamos 4,2 MB).
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x400000,
+spiffs,     data, spiffs,   0x410000, 0xBE0000,
+coredump,   data, coredump, 0xFF0000, 0x10000,
