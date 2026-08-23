@@ -363,6 +363,8 @@ Testes feitos, todos com resultado 0xFF (silêncio):
 5. Protocolo cru: CMD0 direto, sem biblioteca — resposta esperada 0x01, veio 0xFF
 6. Varredura de CS em ~26 GPIOs, nas duas ordens de MISO/MOSI
 7. Cartão reformatado em FAT32 (SDHC 3,74 GB) e verificado funcionando no PC
+8. **Segundo cartão, físico e diferente** — mesmo silêncio (prova definitiva:
+   o defeito é do slot, não do cartão)
 
 ### Consequência
 A JC4827 tem só **4 MB de flash** (confirmado por esptool). Sem cartão sobra
