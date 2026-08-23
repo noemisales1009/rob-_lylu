@@ -330,3 +330,47 @@ Cabem ~8 novas na flash da 4848. Num cartão SD de 4 GB, ~7.400.
 - **Decisão pendente:** construir na 4848 (480x480, funcionando, tela maior) ou na
   JC4827 (480x272, imune ao tremor/pontinho, porte pronto em `lylu_jc4827/`).
   Definir antes de começar, pra não construir as telas duas vezes.
+
+---
+
+## 🔌 Diagnóstico da placa JC4827W543C_I (23/08/2026)
+
+**Veredito: o slot de cartão SD desta unidade está com defeito.** A placa foi
+devolvida/trocada e o projeto seguiu na ESP32-4848S040C.
+
+### O que funciona nela
+- ✅ Display NV3041A via QSPI (CS=45, SCK=47, D0=21, D1=48, D2=40, D3=39)
+- ✅ Luz de fundo no GPIO 1
+- ⚠️ **Cores invertidas**, igual à 4848 → usar a mesma chave `TELA_INVERTE_CORES`
+- 🔊 **Amplificador de áudio embutido** (AX98357A): BCLK=42, LRCLK=2, DIN=41
+  → não precisa comprar o módulo MAX98357A, só um alto-falante 8Ω
+- 🔋 Conector de bateria e botão liga/desliga
+
+### O que NÃO funciona
+- ❌ **Slot microSD (TF)** — não responde nem ao comando CMD0 do protocolo cru
+
+### Como foi diagnosticado (para referência futura)
+Pinagem oficial confirmada em duas fontes (planilha do fabricante em
+`profi-max/JC4827W543_4.3inch_ESP32S3_board/Docs` e `lsdlsd88/JC4827W543`):
+**TF_CS=10, TF_MISO=11, TF_CLK=12, TF_MOSI=13** (compartilhados com o touch
+resistivo RTP, que não é usado na variante C/capacitiva).
+
+Testes feitos, todos com resultado 0xFF (silêncio):
+1. Biblioteca SD em 5 velocidades (400 kHz a 20 MHz)
+2. Ambos os controladores SPI do ESP32-S3 (HSPI e FSPI)
+3. Com e sem resistor de pull-up interno no MISO
+4. Com o display ligado e desligado (havia suspeita de conflito de barramento)
+5. Protocolo cru: CMD0 direto, sem biblioteca — resposta esperada 0x01, veio 0xFF
+6. Varredura de CS em ~26 GPIOs, nas duas ordens de MISO/MOSI
+7. Cartão reformatado em FAT32 (SDHC 3,74 GB) e verificado funcionando no PC
+
+### Consequência
+A JC4827 tem só **4 MB de flash** (confirmado por esptool). Sem cartão sobra
+espaço para ~4 animações; o projeto tem 22. **Sem SD, esta placa não serve.**
+
+### Armadilhas encontradas no caminho (úteis para qualquer porte futuro)
+- O `Serial` só aparece no USB se a opção **CDCOnBoot=cdc** estiver ligada
+  (a placa usa USB nativo do S3, não tem chip CH340 como a 4848).
+- Ler a serial exige `DtrEnable = $true` (diferente da 4848).
+- **Nunca usar GPIO 35, 36, 37 para nada** — são da PSRAM; tocá-los trava a placa
+  e ela some do PC (recupera com BOOT+RESET).
