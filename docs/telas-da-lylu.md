@@ -23,6 +23,56 @@ vermelha, sequência perdida, gráfico despencando. **A Lylu recua.** O comando
 O sarcasmo dela só funciona *porque* existe o contrapeso. É uma amiga que cutuca
 porque sabe recuar quando precisa. Sem o recuo, cutucar vira julgar.
 
+### 🎯 A missão do dia (o antídoto da culpa)
+
+Pedido da Noemi: *"uma alternativa pra que eu não me sinta culpada por não cumprir,
+tipo o mínimo aceitável."*
+
+O problema que isso resolve: uma lista de 8 tarefas com 3 feitas é lida como
+**5 fracassos**, não como 3 vitórias. A conta padrão de qualquer app de tarefas
+produz culpa por construção.
+
+**A mecânica:** todo dia tem **1 a 3 coisas** que definem o dia como ganho.
+Fez a missão → **o dia foi cumprido.** Ponto final. O resto é bônus.
+
+#### Três níveis de dia
+
+| Nível | O que é | A Lylu |
+|---|---|---|
+| 🌟 **Dia cheio** | missão + bônus | comemora junto, sem exagero |
+| ✅ **Dia mínimo** | só a missão | **comemora de verdade** — foi vitória, não consolo |
+| 🛟 **Dia de sobrevivência** | nem a missão deu | acolhe; nenhuma cobrança; o dia não conta contra |
+
+#### As regras que fazem isso funcionar
+
+1. **A missão é curta de propósito.** 1 a 3 itens. Se virar 6, deixa de ser mínimo
+   e volta a ser lista.
+2. **O humor dela segue a MISSÃO, não o total.** Fez a missão e faltaram 5 bônus?
+   Ela fica **comemorando**, não julgadora. Isso muda tudo: hoje o humor olha a
+   contagem total, e por isso ela pode julgar um dia que na verdade foi bom.
+3. **Comemorar sem tom de consolo.** *"Missão do dia batida! 🎉"* — nunca
+   *"ah, pelo menos você fez o mínimo…"*. Prêmio de participação é fracasso
+   disfarçado, e a pessoa sente.
+4. **No dia difícil, o bônus some da tela.** Fica só a missão. Não dá pra sentir
+   culpa do que não está à vista — e conecta direto com o `/diaruim` que já existe.
+5. **A missão pode ser reduzida no meio do dia**, sem drama. Dia desandou? Ela
+   pergunta: *"quer cortar a missão pra uma coisa só?"*
+6. **Um dia de sobrevivência não vira dívida.** Não acumula, não aparece em
+   vermelho amanhã, não conta sequência quebrada.
+
+#### Como implementar (com o que já existe)
+
+- **Quem marca a missão:** a **prioridade do Todoist**. P1 (a vermelha) = missão do
+  dia. Sem infra nova, sem tela nova — você já usa isso.
+- **No `lylu_diario`:** somar as colunas `missao_total` e `missao_feita`, para o
+  histórico e o relatório semanal passarem a medir a missão, não o volume bruto.
+- **Na tela de Tarefas:** a missão em cima, destacada; o bônus abaixo, discreto.
+- **No n8n:** o prompt da Lylu passa a receber a missão separada do resto, e a
+  regra de humor muda para olhar a missão.
+- **Na semana:** contar "dias em que a missão foi cumprida" em vez de porcentagem
+  de tarefas. Uma semana com 5 missões batidas é uma semana ótima, mesmo com
+  30 bônus intocados.
+
 ### Três princípios que saem daí
 
 1. **Ela precisa ter vida própria.** Se ela só existe quando há tarefa pendente,
