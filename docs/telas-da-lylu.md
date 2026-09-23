@@ -415,6 +415,30 @@ I2C responde em 0x5D  <- toque GT911
 seja, a Lylu pode ouvir e falar sem hardware novo — falta só ligar o I2S. `0x32` e
 `0x36` ainda não foram identificados (`0x36` tem cara de medidor de bateria).
 
+### 4. O microfone funciona — e o pino não é o da placa de referência
+
+Resolvido em 23/09/2026. **`audio.c`** liga o ES8311 e a tela de Ajustes →
+Microfone mostra o nível com a Lylu reagindo.
+
+O que custou caro: a placa segue o projeto de referência da Espressif em quase
+tudo (I2C 7/8, MCLK 13, BCLK 12, LRCK 10, DOUT 9), **menos em dois pinos**:
+
+| | placa de referência | esta placa |
+|---|---|---|
+| Dado do microfone (I2S DIN) | GPIO11 | **GPIO48** |
+| Liga o amplificador (PA) | GPIO53 / 20 | **GPIO11** |
+
+Lendo o GPIO11 como dado, a amostra vinha **zero perfeito** — e isso enganou por
+horas, porque parecia "microfone mudo". Não era: zero exato, sem nem ruído de
+fundo, quer dizer **pino errado**. Microfone silencioso ainda entrega ruído de
+uns 300 a 500 de RMS. Fica a regra: `rms == 0` é fiação, `rms` pequeno é volume.
+
+Para conferir depois: silêncio dá ~400, voz normal a um palmo passa de 4000.
+
+O microfone é o **MSM381A3729H9CP**, MEMS analógico, ligado nas entradas
+diferenciais do ES8311 (e alimentado pelo MICBIAS dele). O alto-falante sai por
+um **NS4150** no conector CN3 — ainda não testado.
+
 ### ⚠️ Pendência conhecida: o cão de guarda no boot
 
 `Task watchdog got triggered ... CPU 0: main`, uns 5 s depois da tela ficar pronta.

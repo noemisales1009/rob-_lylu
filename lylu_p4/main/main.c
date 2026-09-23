@@ -1099,6 +1099,106 @@ static void ev_rede(void)
     placa_destrava();
 }
 
+// ---------------------------------------------------------------- MICROFONE
+// Também mora dentro dos Ajustes, como o Wi-Fi. É teste de hardware e presença
+// ao mesmo tempo: a barra prova que o som entra, e ela reagir prova por quê isso
+// importa — a Lylu percebe quando falam com ela.
+
+#define MF_BARRAS 14
+
+static lv_obj_t *mf_tela, *mf_status, *mf_balao, *mf_barra[MF_BARRAS], *aj_mic_sub;
+static bool mf_aberta, mf_ouvindo;
+
+static void ev_mic_abre(lv_event_t *e)
+{
+    mf_aberta = true;
+    lv_obj_remove_flag(mf_tela, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(caixa_pontos, LV_OBJ_FLAG_HIDDEN);
+    atualizar();
+}
+
+static void ev_mic_fecha(lv_event_t *e)
+{
+    mf_aberta = false;
+    lv_obj_add_flag(mf_tela, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(caixa_pontos, LV_OBJ_FLAG_HIDDEN);
+    atualizar();
+}
+
+static void atualiza_microfone(void)
+{
+    int n = audio_nivel();
+    // Uma folga entre subir e descer, senão ela fica trocando de cara a cada sílaba.
+    if (n > 35) mf_ouvindo = true;
+    else if (n < 12) mf_ouvindo = false;
+    if (!audio_escutando()) mf_ouvindo = false;
+
+    int acesos = n * MF_BARRAS / 100;
+    for (int i = 0; i < MF_BARRAS; i++) {
+        bool aceso = i < acesos;
+        lv_color_t c = !aceso ? C_LINHA : i < MF_BARRAS - 4 ? C_OLIVA : C_AMBAR;
+        lv_obj_set_style_bg_color(mf_barra[i], c, 0);
+    }
+
+    lv_label_set_text(mf_status, audio_escutando() ? (mf_ouvindo ? "te ouvindo" : "escutando…")
+                                                   : "o microfone não subiu");
+    lv_obj_set_style_text_color(mf_status, mf_ouvindo ? C_AMBAR : C_FRACO, 0);
+    balao_texto(mf_balao, !audio_escutando() ? "Não consegui abrir os ouvidos dessa vez."
+                        : mf_ouvindo         ? "Tô te ouvindo!"
+                                             : "Fala alguma coisa. Eu tô aqui.");
+    lylu_em(mf_tela, 650, 150);
+    lylu_mostra(!audio_escutando() ? A_CUIDADORA : mf_ouvindo ? A_RINDO : A_PENSANDO);
+}
+
+// A barra precisa de mão mais leve que o resto: atualizar a tela inteira 16x por
+// segundo seria desperdício, então só ela se refaz nesse ritmo.
+static void passo_microfone(lv_timer_t *t)
+{
+    if (mf_aberta) atualiza_microfone();
+}
+
+static void atualiza_linha_mic(void)
+{
+    lv_label_set_text(aj_mic_sub, audio_escutando() ? "Toque para ver se ela te ouve"
+                                                    : "Não subiu — ela segue surda");
+}
+
+static void cria_microfone(void)
+{
+    mf_tela = caixa(lv_layer_top());
+    lv_obj_set_size(mf_tela, TELA_W, WF_ALTURA);
+    lv_obj_set_pos(mf_tela, 0, WF_TOPO);
+    lv_obj_set_style_bg_color(mf_tela, C_FUNDO, 0);
+    lv_obj_set_style_bg_opa(mf_tela, LV_OPA_COVER, 0);
+    lv_obj_add_flag(mf_tela, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(mf_tela, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *voltar = botao(mf_tela, "Voltar", false, ev_mic_fecha);
+    lv_obj_set_pos(voltar, 34, 12);
+    lv_obj_t *tit = texto(mf_tela, "Microfone", f_px_m, C_TINTA);
+    lv_obj_set_pos(tit, 196, 18);
+    mf_status = texto(mf_tela, "", f_corpo, C_FRACO);
+    lv_obj_set_pos(mf_status, 420, 30);
+
+    // A barra: blocos que acendem da esquerda para a direita.
+    lv_obj_t *caixa_barra = caixa(mf_tela);
+    lv_obj_set_pos(caixa_barra, 50, 210);
+    lv_obj_set_flex_flow(caixa_barra, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(caixa_barra, 8, 0);
+    for (int i = 0; i < MF_BARRAS; i++) {
+        mf_barra[i] = caixa(caixa_barra);
+        lv_obj_set_size(mf_barra[i], 34, 110);
+        lv_obj_set_style_radius(mf_barra[i], 8, 0);
+        lv_obj_set_style_bg_color(mf_barra[i], C_LINHA, 0);
+        lv_obj_set_style_bg_opa(mf_barra[i], LV_OPA_COVER, 0);
+    }
+
+    lv_obj_t *dica = texto(mf_tela, "O microfone é da própria placa. Fala perto dela.", f_corpo_p, C_FRACO);
+    lv_obj_set_pos(dica, 50, 350);
+
+    mf_balao = balao(mf_tela, 640, 20, 250);
+}
+
 // ---------------------------------------------------------------- AJUSTES
 static lv_obj_t *linha_ajuste(lv_obj_t *pai, const char *nome, const char *sub)
 {
@@ -1154,6 +1254,12 @@ static void cria_ajustes(lv_obj_t *t)
     texto(lw, ">", f_px_p, C_FRACO);
     lv_obj_add_flag(lw, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(lw, ev_wifi_abre, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lm = linha_ajuste(col, "Microfone", "");
+    aj_mic_sub = lv_obj_get_child(lv_obj_get_child(lm, 0), 1);
+    texto(lm, ">", f_px_p, C_FRACO);
+    lv_obj_add_flag(lm, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(lm, ev_mic_abre, LV_EVENT_CLICKED, NULL);
+
     aj_dificil = chave(linha_ajuste(col, "Dia difícil", "Só a missão aparece, sem cutucadas"), false);
     lv_obj_add_event_cb(aj_dificil, ev_dificil, LV_EVENT_VALUE_CHANGED, NULL);
     chave(linha_ajuste(col, "Silêncio no foco", "Nenhum som enquanto o timer roda"), true);
@@ -1200,8 +1306,10 @@ static void atualizar(void)
     atualiza_tarefas();
     atualiza_foco();
     atualiza_linha_wifi();
+    atualiza_linha_mic();
 
     if (wf_aberta) { atualiza_wifi(); return; }
+    if (mf_aberta) { atualiza_microfone(); return; }
 
     switch (tela_atual) {
     case T_FOCO:    lylu_na_tela(T_FOCO, 560, 140); lylu_mostra(anim_foco()); break;
@@ -1285,6 +1393,7 @@ void app_main(void)
     cria_semana(tiles[T_SEMANA]);
     cria_ajustes(tiles[T_AJUSTES]);
     cria_wifi();
+    cria_microfone();
 
     lylu = lv_gif_create(tiles[T_FOCO]);
     lylu_outra = lv_gif_create(tiles[T_FOCO]);
@@ -1299,6 +1408,7 @@ void app_main(void)
     atualizar();
     lv_timer_create(tique, 1000, NULL);
     lv_timer_create(passo_casa, 33, NULL);
+    lv_timer_create(passo_microfone, 60, NULL);
     placa_destrava();
 
     audio_iniciar();         // ES8311: se não responder, ela segue surda e nada quebra

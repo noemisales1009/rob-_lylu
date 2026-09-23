@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 #include "placa.h"
 
 static const char *TAG = "audio";
@@ -25,11 +26,18 @@ static const char *TAG = "audio";
 #define PINO_BCLK  GPIO_NUM_12
 #define PINO_WS    GPIO_NUM_10
 #define PINO_DOUT  GPIO_NUM_9    // a Lylu falando
-#define PINO_DIN   GPIO_NUM_11   // a Lylu escutando
-#define PINO_PA    GPIO_NUM_20   // liga o amplificador do alto-falante
+#define PINO_DIN   GPIO_NUM_48   // a Lylu escutando
+#define PINO_PA    GPIO_NUM_11   // liga o amplificador do alto-falante
+
+// ATENÇÃO: estes dois últimos NÃO seguem a placa de referência, e foi aí que eu
+// me perdi. Na EV board o dado do microfone entra pelo GPIO11; aqui o 11 é o
+// liga/desliga do amplificador, e o microfone entra pelo 48. Lendo o 11 como
+// dado, a amostra vinha zero perfeito — não era ruído baixo, era pino errado.
 
 #define TAXA       16000
 #define QUADRO     320           // 20 ms de som por leitura
+
+static int64_t agora_ms(void) { return esp_timer_get_time() / 1000; }
 
 static esp_codec_dev_handle_t ouvido;
 static int nivel;
@@ -62,7 +70,7 @@ static void escuta(void *p)
     int16_t *buf = malloc(amostras * sizeof *buf);
     if (!buf) { vTaskDelete(NULL); return; }
 
-    int64_t conta = 0;
+    int64_t ultimo_aviso = 0;
     for (;;) {
         if (esp_codec_dev_read(ouvido, buf, amostras * sizeof *buf) != ESP_CODEC_DEV_OK) {
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -78,10 +86,12 @@ static void escuta(void *p)
         // Sobe na hora, desce devagar: a barra acompanha a voz em vez de piscar.
         nivel = agora > nivel ? agora : (nivel * 7 + agora * 3) / 10;
 
-        // DIAGNÓSTICO enquanto não existe a tela: tirar quando a barra existir.
-        if (++conta % 25 == 0)
-            ESP_LOGI(TAG, "nivel=%d rms=%d  cru: %d %d %d %d", nivel, rms,
-                     buf[0], buf[1], buf[2], buf[3]);
+        // Um aviso só quando alguém fala de verdade, e no máximo uma vez por
+        // segundo: serve para saber que ela está escutando sem encher o log.
+        if (agora > 25 && agora_ms() - ultimo_aviso > 1000) {
+            ultimo_aviso = agora_ms();
+            ESP_LOGI(TAG, "ouvi alguma coisa (nivel %d)", agora);
+        }
     }
 }
 
@@ -126,18 +136,6 @@ void audio_iniciar(void)
     int e = esp_codec_dev_open(ouvido, &fs);
     if (e != ESP_CODEC_DEV_OK) { ESP_LOGE(TAG, "esp_codec_dev_open falhou (%d)", e); return; }
     esp_codec_dev_set_in_gain(ouvido, 30.0);
-
-    // DIAGNÓSTICO: o que o chip diz de si mesmo depois de configurado.
-    // 0x09/0x0A = formato do I2S, 0x14 = entrada do microfone e ganho do PGA,
-    // 0x15..0x1B = o caminho do ADC, 0x17 = volume do ADC.
-    char linha[160];
-    int n = 0;
-    for (int r = 0x09; r <= 0x1B && n < (int)sizeof linha - 8; r++) {
-        int v = -1;
-        esp_codec_dev_read_reg(ouvido, r, &v);
-        n += snprintf(linha + n, sizeof linha - n, "%02X=%02X ", r, v & 0xff);
-    }
-    ESP_LOGI(TAG, "ES8311 %s", linha);
 
     ligado = true;
     xTaskCreate(escuta, "escuta", 4096, NULL, 4, NULL);
