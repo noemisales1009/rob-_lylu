@@ -1,0 +1,23 @@
+# Artefatos de compilação (ESP-IDF e Arduino)
+build/
+managed_components/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+*-build/
+*-build-temp/
+output_teste_*/
+
+# O ESP-IDF inteiro foi baixado aqui dentro — são gigabytes de ferramenta
+tools/esp-idf-*/
+
+# Despejo de 16 MB da flash de fábrica da P4. É referência de hardware, não
+# código: foi dele que saíram a pinagem do áudio e o nome do BSP. Fica fora do
+# repositório, mas NÃO apague da máquina — vale guardar.
+output/backup-p4-fabrica/
+
+# Clone de projeto de terceiros, usado só como consulta
+xiaozhi-esp32-lylu/
+
+# Configuração local do editor
+.vscode/

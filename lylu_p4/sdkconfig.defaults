@@ -1,0 +1,40 @@
+CONFIG_IDF_TARGET="esp32p4"
+# O chip desta placa e revisao v1.3 (o ESP-IDF 5.5 assume v3.x por padrao)
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# PSRAM de 32 MB (hex, 200 MHz), igual a demonstracao de fabrica
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# LVGL: GIF da Lylu e fontes TTF (acentos do portugues)
+CONFIG_LV_USE_GIF=y
+CONFIG_LV_USE_TINY_TTF=y
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_CLIB_STRING=y
+CONFIG_LV_USE_CLIB_SPRINTF=y
+CONFIG_LV_DEF_REFR_PERIOD=16
+CONFIG_LV_FONT_MONTSERRAT_14=y
+
+# Wi-Fi pelo ESP32-C6 da placa (ESP-Hosted sobre SDIO).
+# Os pinos padrao do componente ja batem com esta placa: CMD=19, CLK=18,
+# D0..D3=14..17, reset do C6 no 54 (conferido no projeto espcontrol).
+# O relogio e que muda: 20 MHz em vez de 40, que e o que o pessoal do
+# espcontrol usa para os paineis de producao nao ficarem intermitentes.
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
+
+# O C6 desta placa veio de fabrica com ESP-Hosted 2.3.0, nove versoes atras do
+# lado que roda aqui (2.12). O canal de controle (varredura, conectar, eventos)
+# se entende, mas o de dados nao: ela associa na rede e o DHCP nunca volta.
+# O suspeito e o "streaming mode", uma otimizacao de RECEPCAO que as versoes
+# novas ligam por padrao e que o C6 antigo provavelmente nao fala.
+# Desligar custa um pouco de desempenho e nao encosta no C6.
+CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_NONE=y

@@ -251,16 +251,35 @@ relatório semanal que já estava planejado pro Telegram.
 WiFi, status da conexão, brilho, e o modo dia difícil acessível por um toque
 (hoje só pelo Telegram).
 
-**WiFi: usar portal cativo, NÃO teclado na tela.** Digitar senha num teclado de
-480x272 é sofrido (teclas de ~30px, maiúscula/minúscula/número/símbolo). O jeito
-que funciona:
-1. A tela mostra *"Me conecte! Rede: **Lylu-Setup**"*, com a Lylu curiosa do lado
-2. Você conecta o celular nessa rede
-3. Abre sozinho um formulário com a lista de redes que ela achou
-4. Você digita no teclado do celular; ela salva (NVS/Preferences) e conecta 🎉
+#### ✅ WiFi: decisão revista em 22/09/2026 — **teclado na tela**
 
-Bônus: tira as credenciais do código de vez — hoje estão como `SUA_REDE_AQUI`
-justamente pra não vazar no GitHub.
+A decisão anterior era portal cativo, e o motivo era o tamanho da tela: digitar
+senha num teclado de 480x272 é sofrido (teclas de ~30px, com maiúscula, minúscula,
+número e símbolo se revezando). Na ESP32-P4 a tela passou a ser **1024x600**, onde
+a tecla sai com ~90px — maior que a de qualquer celular. O motivo caiu; a decisão
+caiu junto. Sem portal cativo, sem modo ponto de acesso, sem celular no meio.
+
+Como ficou (`lylu_p4/main/rede.c` + a seção WI-FI do `main.c`):
+
+1. Ajustes → **Wi-Fi** abre uma tela por cima das outras (a barra de status
+   continua à vista, porque a carinha dela é o lembrete que atravessa tudo)
+2. A lista de redes aparece sozinha, ordenada por sinal, sem as repetidas de 5 GHz
+3. Toca na rede → teclado em português embaixo, **a Lylu espiando por trás dele**
+4. Conectou → a senha vai pra NVS e ela volta sozinha nos próximos boots 🎉
+
+Duas coisas vieram junto:
+- **As credenciais saíram do código de vez.** No sketch antigo estavam como
+  `SUA_REDE_AQUI` justamente pra não vazar no GitHub.
+- **O relógio passou a ser confiável.** Com internet ele pega a hora por NTP;
+  antes mostrava a hora em que o programa foi compilado. Como a cegueira temporal
+  é metade do motivo da tela de Relógio existir, isso não é detalhe.
+
+O portal cativo volta da gaveta se algum dia a Lylu tiver uma tela pequena de novo.
+
+**Teclado sem símbolo nenhum.** O teclado pronto da LVGL marca as teclas de
+comando com ícones da fonte Montserrat, que as fontes TTF da Lylu não têm — sairia
+quadradinho vazio. Então o mapa é nosso, com as teclas escritas: `Apagar`,
+`Cancelar`, `Conectar`. Ficou mais na voz dela do que os ícones seriam.
 
 ### ⏸️ Adiados de propósito
 **Clima e notícias.** Bonitinhos, mas exigem chave de API e manutenção, e o
@@ -333,6 +352,78 @@ Cabem ~8 novas na flash da 4848. Num cartão SD de 4 GB, ~7.400.
 
 ---
 
+## 🔌 Diagnóstico da Guition JC1060P470 (22/09/2026)
+
+Três coisas descobertas ao fazer a tela de Wi-Fi funcionar. Todas custaram horas e
+nenhuma estava documentada em lugar nenhum — ficam aqui para o próximo.
+
+### 1. O toque estava deslocado desde sempre
+
+O `placa.c` convertia as coordenadas do GT911 de 800x480 para 1024x600, seguindo a
+demonstração de fábrica. **O GT911 desta placa reporta direto em 1024x600.** A
+conversão empurrava todo toque 28% para a direita e 25% para baixo.
+
+Passou despercebido porque nada exigia precisão: arrastar entre telas é gesto, e os
+alvos eram grandes. Perto do topo o erro é de ~25px e ainda dá pra acertar um botão;
+embaixo passa de 90px. O teclado do Wi-Fi foi a primeira coisa a expor isso — as
+teclas de baixo grudavam todas na borda.
+
+**Como foi medido:** uma linha de log no `process_coordinates` imprimindo o valor cru
+e o convertido. Apareceu `cru 98,540 -> tela 125,599`: um `y` cru de 540, acima dos
+480 que a conversão supunha. Prova direta, sem teoria.
+
+### 2. O DHCP não voltava — era uma otimização do SDIO
+
+A placa associava na rede e o IP nunca chegava. O que confundia: varredura, conexão
+e eventos funcionavam **perfeitamente**.
+
+A explicação é que controle e dados são caminhos diferentes no ESP-Hosted. O C6 veio
+de fábrica com ESP-Hosted **2.3.0**, e o componente do host é **2.12.x** — nove
+versões à frente. O host liga por padrão o `STREAMING MODE`, uma otimização de
+**recepção** que o C6 antigo não fala. Resultado: comando vai e volta (controle),
+mas a oferta do DHCP, que chega de fora, se perde.
+
+**A correção** (uma linha no `sdkconfig.defaults`, sem encostar no C6):
+
+```
+CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_NONE=y
+```
+
+O log passa a dizer `SDIO Host operating in PACKET MODE` e o IP chega em 1–2 s.
+
+> **A pista que resolveu:** o Wi-Fi tinha pegado IP duas vezes antes, por acaso.
+> Incompatibilidade total não funcionaria *nunca* — o que funciona às vezes é
+> otimização mal-entendida. Foi esse detalhe que descartou "trocar tudo de versão"
+> e apontou para o alvo certo.
+
+Fica pendente atualizar o firmware do C6 (o aviso de versão continua aparecendo).
+Enquanto a rede funcionar, não é urgente — e regravar o segundo chip tem risco.
+
+### 3. A placa tem microfone e alto-falante
+
+Uma varredura do barramento I2C no boot (que ficou no `placa.c`, é barata e útil):
+
+```
+I2C responde em 0x14  <- toque GT911
+I2C responde em 0x18  <- codec de audio ES8311
+I2C responde em 0x32
+I2C responde em 0x36
+I2C responde em 0x5D  <- toque GT911
+```
+
+**O ES8311 respondeu.** É codec de entrada *e* saída: microfone e alto-falante. Ou
+seja, a Lylu pode ouvir e falar sem hardware novo — falta só ligar o I2S. `0x32` e
+`0x36` ainda não foram identificados (`0x36` tem cara de medidor de bateria).
+
+### ⚠️ Pendência conhecida: o cão de guarda no boot
+
+`Task watchdog got triggered ... CPU 0: main`, uns 5 s depois da tela ficar pronta.
+É **aviso, não travamento** — ela segue e liga normal. O `app_main` monta as seis
+telas de uma vez sem ceder a vez, e a tarefa da LVGL fica girando em falso esperando
+a trava. Anterior à tela de Wi-Fi, mas ela engordou o trecho.
+
+---
+
 ## 🔌 Diagnóstico da placa JC4827W543C_I (23/08/2026)
 
 **Veredito: o slot de cartão SD desta unidade está com defeito.** A placa foi
@@ -363,7 +454,10 @@ Testes feitos, todos com resultado 0xFF (silêncio):
 5. Protocolo cru: CMD0 direto, sem biblioteca — resposta esperada 0x01, veio 0xFF
 6. Varredura de CS em ~26 GPIOs, nas duas ordens de MISO/MOSI
 7. Cartão reformatado em FAT32 (SDHC 3,74 GB) e verificado funcionando no PC
-8. **Segundo cartão, físico e diferente** — mesmo silêncio (prova definitiva:
+8. **Segundo cartão, físico e diferente** — mesmo silêncio
+9. **Fonte externa** (carregador Samsung 5V/2A, fora da porta USB do PC) —
+   mesmo silêncio. Descarta queda de tensão, a última hipótese em aberto
+   (prova definitiva:
    o defeito é do slot, não do cartão)
 
 ### Consequência
