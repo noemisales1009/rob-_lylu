@@ -15,8 +15,10 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 
-# LVGL: GIF da Lylu e fontes TTF (acentos do portugues)
-CONFIG_LV_USE_GIF=y
+# LVGL: fontes TTF (acentos do portugues). O GIF da LVGL 9.2.2 fica DESLIGADO:
+# ele tem um defeito que faz a Lylu congelar ou sumir com o tempo, e o projeto
+# usa uma copia corrigida em main/gif/ (ver o comentario em gifdec.c).
+# CONFIG_LV_USE_GIF is not set
 CONFIG_LV_USE_TINY_TTF=y
 CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y

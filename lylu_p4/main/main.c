@@ -7,11 +7,12 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "lvgl.h"
-#include "src/libs/gif/lv_gif_private.h"
+#include "gif/lv_gif_private.h"   // copia corrigida do GIF da LVGL (ver gif/gifdec.c)
 #include "audio.h"
 #include "placa.h"
 #include "rede.h"
@@ -220,11 +221,21 @@ static void guarda_a_que_saiu(void)
 
 static void fim_da_troca(lv_anim_t *a) { guarda_a_que_saiu(); }
 
+static void loga_memoria(const char *quando)
+{
+    ESP_LOGI(TAG, "memoria (%s): interna %u livre / %u maior bloco, psram %u livre / %u maior bloco", quando,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+}
+
 static void lylu_mostra(anim_t a)
 {
     if (carinho_ate > agora_ms()) a = A_RINDO;
     if (a == lylu_anim) return;
-    bool primeira = lylu_anim == A_TOTAL;
+    anim_t antes = lylu_anim;
+    bool primeira = antes == A_TOTAL;
     lylu_anim = a;
 
     if (!primeira) {
@@ -239,6 +250,21 @@ static void lylu_mostra(anim_t a)
     }
 
     lv_gif_set_src(lylu, &GIF[a]);
+    // Cada GIF aberto pede uns 650 KB de uma vez. Se não vier, a LVGL só avisa e
+    // deixa o objeto vazio — e como lylu_anim já dizia a pose nova, ninguém tentava
+    // de novo: ela sumia de vez. Agora a troca é desfeita (a que ia sair continua
+    // na tela) e a próxima chamada tenta outra vez.
+    if (!((lv_gif_t *)lylu)->gif) {
+        ESP_LOGW(TAG, "GIF %d nao abriu", (int)a);
+        loga_memoria("gif falhou");
+        lylu_anim = antes;
+        if (!primeira) {
+            lv_obj_t *falhou = lylu;
+            lylu = lylu_outra;
+            lylu_outra = falhou;
+        }
+        return;
+    }
     lv_gif_resume(lylu);
     limpa_fundo_gif(lylu);
     lv_obj_remove_flag(lylu, LV_OBJ_FLAG_HIDDEN);
@@ -264,6 +290,7 @@ static void lylu_em(lv_obj_t *pai, int x, int y)
         lv_obj_t *g = i ? lylu_outra : lylu;
         if (lv_obj_get_parent(g) != pai) lv_obj_set_parent(g, pai);
         lv_obj_set_pos(g, x, y);
+        lv_obj_add_flag(g, LV_OBJ_FLAG_CLICKABLE);   // a senha do Wi-Fi tira; aqui volta
     }
     lv_obj_move_foreground(lylu);
 }
@@ -973,6 +1000,10 @@ static void atualiza_wifi(void)
         lv_label_set_text(wf_senha_titulo, s);
         balao_texto(wf_balao_senha, wf_fala(e));
         lylu_em(wf_tela, 656, 10);
+        // Os 360x360 dela (transparentes, mas tocáveis por causa do carinho) cobrem
+        // o botão "mostrar": o toque ia pra ela e a senha nunca aparecia.
+        lv_obj_remove_flag(lylu, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(lylu_outra, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_move_foreground(wf_teclado);     // ela fica atrás do teclado, espiando
     } else {
         wf_n = rede_copia_lista(wf_achadas, REDE_MAX_ACHADAS);
@@ -1330,9 +1361,29 @@ static void ev_troca_tela(lv_event_t *e)
     atualizar();
 }
 
+// Rede de segurança: se por qualquer motivo a Lylu da frente ficou sem GIF ou
+// escondida, conta no log o estado em que ela estava e a põe de volta.
+static void vigia_lylu(void)
+{
+    lv_gif_t *g = (lv_gif_t *)lylu;
+    bool sem_gif = !g->gif, escondida = lv_obj_has_flag(lylu, LV_OBJ_FLAG_HIDDEN);
+    if (!sem_gif && !escondida) return;
+    ESP_LOGW(TAG, "Lylu sumiu: anim %d, sem_gif %d, escondida %d, opa %d, x %d, y %d",
+             (int)lylu_anim, sem_gif, escondida, (int)lv_obj_get_style_image_opa(lylu, 0),
+             (int)lv_obj_get_x(lylu), (int)lv_obj_get_y(lylu));
+    loga_memoria("vigia");
+    lv_anim_delete(lylu, opacidade);
+    guarda_a_que_saiu();
+    lylu_anim = A_TOTAL;     // força reabrir o GIF do zero, sem passagem
+    atualizar();
+}
+
 static void tique(lv_timer_t *t)
 {
     atualiza_hora();
+    vigia_lylu();
+    static int seg;
+    if (++seg % 300 == 0) loga_memoria("a cada 5 min");
     if (foco.rodando && --foco.resto <= 0) {
         foco.rodando = false; foco.acabou = true; foco.resto = 0; foco.blocos++;
         atualizar();
