@@ -47,6 +47,7 @@ rede_estado_t rede_estado(void);
 const char *rede_nome(void);    // rede conectada ou salva; "" se nenhuma
 const char *rede_ip(void);      // "" enquanto não conecta
 bool rede_tem_salva(void);
+int rede_sinal(void);           // barras (1 a 4) da rede conectada; 0 se não conectou ou não mediu
 
 // Copia a última varredura para o chamador (a lista muda na thread de eventos).
 // Devolve quantas redes copiou.

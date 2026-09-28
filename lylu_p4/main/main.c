@@ -10,6 +10,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "lvgl.h"
 #include "gif/lv_gif_private.h"   // copia corrigida do GIF da LVGL (ver gif/gifdec.c)
@@ -189,6 +190,57 @@ static lv_obj_t *botao(lv_obj_t *pai, const char *s, bool principal, lv_event_cb
     return b;
 }
 
+// ---------------------------------------------------------------- o sinal do Wi-Fi
+// Quatro barrinhas que contam o estado sem precisar ler: entrando, elas enchem
+// uma a uma, em ciclo; conectada, mostram a força do sinal em verde; se a rede
+// sumiu ou a senha não bateu, a primeira pisca em âmbar. Todas as cópias (barra
+// de cima, Ajustes, tela do Wi-Fi) andam juntas, pintadas por um timer só.
+#define MAX_SINAIS 4
+static lv_obj_t *sinais[MAX_SINAIS];
+static int n_sinais;
+
+static lv_obj_t *sinal_cria(lv_obj_t *pai)
+{
+    lv_obj_t *b = caixa(pai);
+    lv_obj_set_size(b, 4 * 5 + 3 * 3, 20);
+    for (int i = 0; i < 4; i++) {
+        int h = 5 + i * 5;
+        lv_obj_t *t = caixa(b);
+        lv_obj_set_size(t, 5, h);
+        lv_obj_set_pos(t, i * 8, 20 - h);
+        lv_obj_set_style_radius(t, 2, 0);
+        lv_obj_set_style_bg_color(t, C_LINHA, 0);
+        lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
+    }
+    if (n_sinais < MAX_SINAIS) sinais[n_sinais++] = b;
+    return b;
+}
+
+static void sinal_pinta(lv_timer_t *t)
+{
+    static int passo, antes_cheias = -1;
+    static lv_color_t antes_cor;
+    passo = (passo + 1) % 5;
+
+    int cheias = 0;
+    lv_color_t cor = C_TINTA;
+    switch (rede_estado()) {
+    case REDE_PROCURANDO:
+    case REDE_CONECTANDO:   cheias = passo; break;
+    case REDE_CONECTADA:    cheias = rede_sinal() ? rede_sinal() : 4; cor = C_OLIVA; break;
+    case REDE_SUMIU:
+    case REDE_SENHA_ERRADA: cheias = passo % 2; cor = C_AMBAR; break;
+    default: break;
+    }
+    // Parada no mesmo desenho, não pinta de novo (a tela só redesenha o que mudou).
+    if (cheias == antes_cheias && lv_color_eq(cor, antes_cor)) return;
+    antes_cheias = cheias;
+    antes_cor = cor;
+    for (int s = 0; s < n_sinais; s++)
+        for (int i = 0; i < 4; i++)
+            lv_obj_set_style_bg_color(lv_obj_get_child(sinais[s], i), i < cheias ? cor : C_LINHA, 0);
+}
+
 // ---------------------------------------------------------------- a Lylu
 // O decodificador de GIF da LVGL começa o quadro pintando a cor de fundo OPACA e só
 // a torna transparente onde um quadro já foi apagado — sobrava um quadrado preto
@@ -326,6 +378,8 @@ static void cria_status(void)
 
     lv_obj_t *esp = caixa(bar);
     lv_obj_set_flex_grow(esp, 1);
+
+    sinal_cria(bar);
 
     st_humor = caixa(bar);
     lv_obj_set_style_bg_color(st_humor, C_CARTAO, 0);
@@ -1053,10 +1107,11 @@ static void cria_wifi(void)
     lv_obj_t *tit = texto(wf_tela, "Wi-Fi", f_px_m, C_TINTA);
     lv_obj_set_pos(tit, 196, 18);
     // Ao lado do título, não na direita: lá ela passava por baixo do balão da Lylu.
+    lv_obj_set_pos(sinal_cria(wf_tela), 330, 33);
     wf_status = texto(wf_tela, "", f_corpo, C_FRACO);
-    lv_obj_set_width(wf_status, 330);
+    lv_obj_set_width(wf_status, 290);
     lv_label_set_long_mode(wf_status, LV_LABEL_LONG_DOT);
-    lv_obj_set_pos(wf_status, 330, 30);
+    lv_obj_set_pos(wf_status, 372, 30);
 
     // ---- lista ----
     wf_lista = caixa(wf_tela);
@@ -1282,6 +1337,7 @@ static void cria_ajustes(lv_obj_t *t)
 
     lv_obj_t *lw = linha_ajuste(col, "Wi-Fi", "");
     aj_wifi_sub = lv_obj_get_child(lv_obj_get_child(lw, 0), 1);
+    lv_obj_set_style_margin_right(sinal_cria(lw), 18, 0);
     texto(lw, ">", f_px_p, C_FRACO);
     lv_obj_add_flag(lw, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(lw, ev_wifi_abre, LV_EVENT_CLICKED, NULL);
@@ -1414,6 +1470,16 @@ static void acerta_hora_inicial(void)
 // ---------------------------------------------------------------- início
 void app_main(void)
 {
+    // Ela reinicia sozinha às vezes, sem pânico no log (a porta USB cai junto e
+    // leva a mensagem). O motivo fica guardado no chip e só dá pra ler aqui.
+    static const char *MOTIVO[] = { "desconhecido", "ligou na tomada", "pino EN/RESET", "esp_restart",
+                                    "PANICO (erro no programa)", "watchdog de interrupcao",
+                                    "watchdog de tarefa", "outro watchdog", "saiu do deep sleep",
+                                    "QUEDA DE TENSAO (brownout)", "SDIO", "USB", "JTAG", "eFuse",
+                                    "falha de energia", "CPU travada" };
+    esp_reset_reason_t r = esp_reset_reason();
+    ESP_LOGW(TAG, "ligou por: %s (%d)", r < sizeof MOTIVO / sizeof *MOTIVO ? MOTIVO[r] : "?", (int)r);
+
     acerta_hora_inicial();
     placa_iniciar();
     carrega_gifs();
@@ -1460,6 +1526,7 @@ void app_main(void)
     lv_timer_create(tique, 1000, NULL);
     lv_timer_create(passo_casa, 33, NULL);
     lv_timer_create(passo_microfone, 60, NULL);
+    lv_timer_create(sinal_pinta, 350, NULL);
     placa_destrava();
 
     audio_iniciar();         // ES8311: se não responder, ela segue surda e nada quebra

@@ -435,6 +435,20 @@ const char *rede_nome(void) { return alvo_nome; }
 const char *rede_ip(void) { return meu_ip; }
 bool rede_tem_salva(void) { return tem_salva; }
 
+// As barras vêm da última varredura, não de uma pergunta ao C6: cada
+// esp_wifi_sta_get_ap_info atravessa o SDIO até um ESP-Hosted 2.3.0 que já
+// avisa de RPC timeouts, e o sinal não precisa de tanta precisão.
+int rede_sinal(void)
+{
+    if (estado != REDE_CONECTADA || !trava) return 0;
+    int b = 0;
+    xSemaphoreTake(trava, portMAX_DELAY);
+    for (int i = 0; i < quantas && !b; i++)
+        if (!strcmp(lista[i].nome, alvo_nome)) b = lista[i].barras;
+    xSemaphoreGive(trava);
+    return b;
+}
+
 int rede_copia_lista(rede_achada_t *destino, int maximo)
 {
     if (!trava) return 0;
