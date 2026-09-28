@@ -158,6 +158,10 @@ static void guarda_varredura(void)
         ap[j] = x;
     }
 
+    for (int i = 0; i < n; i++)
+        ESP_LOGI(TAG, "  \"%s\" canal %d sinal %d seguranca %d", (const char *)ap[i].ssid,
+                 ap[i].primary, ap[i].rssi, ap[i].authmode);
+
     xSemaphoreTake(trava, portMAX_DELAY);
     quantas = 0;
     for (int i = 0; i < n && quantas < REDE_MAX_ACHADAS; i++) {
@@ -217,6 +221,7 @@ static void ev_wifi(void *arg, esp_event_base_t base, int32_t id, void *dados)
     case WIFI_EVENT_SCAN_DONE:
         guarda_varredura();
         estado = antes;
+        if (!meu_ip[0] && tem_salva && !pedido_agora) agenda_tentativa(ESPERA_VOLTAR_MS);
         avisa();
         break;
 
@@ -234,6 +239,7 @@ static void ev_wifi(void *arg, esp_event_base_t base, int32_t id, void *dados)
     case WIFI_EVENT_STA_DISCONNECTED: {
         wifi_event_sta_disconnected_t *e = dados;
         meu_ip[0] = 0;
+        ESP_LOGW(TAG, "caiu de \"%s\" (motivo %d, sinal %d)", alvo_nome, e->reason, e->rssi);
         // Sair da rede antiga para entrar na nova gera uma desconexão que é NOSSA.
         // Sem tratar isso, o tratador lia como "a conexão caiu" e agendava outra
         // tentativa, que gerava outra desconexão: seis connect em 2 segundos.
@@ -287,6 +293,14 @@ static QueueHandle_t fila;
 
 static void faz_procurar(void)
 {
+    // Sem rede, a tentativa de voltar para a salva (a cada 15 s) usa o mesmo rádio
+    // e atropela a varredura: a lista vinha vazia ou pela metade, e justo a rede
+    // de casa não aparecia. Então a tentativa espera a varredura acabar.
+    if (!meu_ip[0]) {
+        if (relogio_retry) esp_timer_stop(relogio_retry);
+        saida_nossa = true;
+        esp_wifi_disconnect();
+    }
     wifi_scan_config_t c = { .show_hidden = false };
     if (esp_wifi_scan_start(&c, false) == ESP_OK) return;
     estado = antes;                  // nem começou: volta pro que era
@@ -305,6 +319,7 @@ static void faz_conectar(const char *nome, const char *senha)
     memcpy(c.sta.ssid, alvo_nome, strnlen(alvo_nome, sizeof c.sta.ssid));
     strlcpy((char *)c.sta.password, alvo_senha, sizeof c.sta.password);
     c.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    ESP_LOGI(TAG, "pedido: entrar em \"%s\" com senha de %d caracteres", alvo_nome, (int)strlen(alvo_senha));
 
     saida_nossa = true;
     esp_wifi_disconnect();
