@@ -77,7 +77,7 @@ static void carrega_gifs(void)
 }
 
 // ---------------------------------------------------------------- fontes
-static lv_font_t *f_corpo, *f_corpo_p, *f_corpo_g, *f_negrito, *f_negrito_g, *f_px_p, *f_px_m, *f_px_g, *f_px_relogio, *f_px_foco;
+static lv_font_t *f_corpo, *f_corpo_p, *f_corpo_g, *f_negrito, *f_negrito_p, *f_negrito_m, *f_negrito_g, *f_px_p, *f_px_m, *f_px_g, *f_px_relogio, *f_px_foco;
 
 static lv_font_t *ttf(const uint8_t *ini, const uint8_t *fim, int tam)
 {
@@ -90,6 +90,8 @@ static void carrega_fontes(void)
     f_corpo   = ttf(corpo_ttf_start, corpo_ttf_end, 20);
     f_corpo_g = ttf(corpo_ttf_start, corpo_ttf_end, 30);
     f_negrito = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 22);
+    f_negrito_p = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 17);
+    f_negrito_m = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 27);
     f_negrito_g = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 34);
     f_px_p    = ttf(pixel_ttf_start, pixel_ttf_end, 20);
     f_px_m    = ttf(pixel_ttf_start, pixel_ttf_end, 38);
@@ -119,7 +121,7 @@ static char tarefa_atual[64] = "O que você quiser";
 static struct { bool rodando; int resto, bloco, feitos; } foco = { false, 25 * 60, 1, 0 };
 static struct { bool rodando, longa; int resto, cuidado; } pausa = { false, false, 5 * 60, -1 };
 
-enum { T_FOCO, T_TAREFAS, T_CASA, T_RELOGIO, T_SEMANA, T_AJUSTES, N_TELAS };
+enum { T_FOCO, T_TAREFAS, T_RECADOS, T_CASA, T_RELOGIO, T_SEMANA, T_AJUSTES, N_TELAS };
 static int tela_atual = T_FOCO;
 
 static int64_t agora_ms(void) { return esp_timer_get_time() / 1000; }
@@ -1277,6 +1279,163 @@ static void atualiza_tarefas(void)
     balao_texto(tar_balao, fala);
 }
 
+// ---------------------------------------------------------------- RECADOS
+// Um recado por vez: o que a Lylu guardou pra você não precisar guardar na
+// cabeça. "Entendi" tira da fila; "Lembrar depois" manda pro fim dela.
+// Por enquanto os recados moram aqui; o próximo passo é vir do n8n/Supabase.
+typedef struct {
+    const char *dia, *dia_maiusc, *hora, *titulo, *detalhe, *tipo, *fala, *fala_forte;
+    bool visto;
+} recado_t;
+
+static recado_t recados[] = {
+    { "amanhã", "AMANHÃ", "14:00", "Postar a placa nos Correios",
+      "Levar o display com defeito para devolução.", "lembrete",
+      "Mica, amanhã tem Correios.", "Eu te lembro na hora.", false },
+};
+#define N_RECADOS (sizeof(recados) / sizeof(recados[0]))
+
+static int recado_atual;          // índice do que está na frente da fila
+static bool recado_adiado;        // acabou de tocar em "Lembrar depois"
+static lv_obj_t *rec_titulo, *rec_sub, *rec_cartao, *rec_quando, *rec_tipo, *rec_nome, *rec_detalhe, *rec_rodape, *rec_balao;
+
+static int recados_pendentes(void)
+{
+    int n = 0;
+    for (int i = 0; i < (int)N_RECADOS; i++) n += !recados[i].visto;
+    return n;
+}
+
+// O próximo não visto, dando a volta na fila a partir de "de".
+static int proximo_recado(int de)
+{
+    for (int k = 0; k < (int)N_RECADOS; k++) {
+        int i = (de + k) % N_RECADOS;
+        if (!recados[i].visto) return i;
+    }
+    return -1;
+}
+
+static void ev_recado_entendi(lv_event_t *e)
+{
+    recados[recado_atual].visto = true;
+    recado_adiado = false;
+    int p = proximo_recado(recado_atual + 1);
+    if (p >= 0) recado_atual = p;
+    atualizar();
+}
+
+static void ev_recado_depois(lv_event_t *e)
+{
+    recado_adiado = true;
+    int p = proximo_recado(recado_atual + 1);
+    if (p >= 0) recado_atual = p;
+    atualizar();
+}
+
+static void cria_recados(lv_obj_t *t)
+{
+    lv_obj_t *tag = caixa(t);
+    lv_obj_set_pos(tag, 44, 84);
+    lv_obj_set_flex_flow(tag, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(tag, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(tag, 10, 0);
+    lv_obj_t *ponto = caixa(tag);
+    lv_obj_set_size(ponto, 6, 6);
+    lv_obj_set_style_radius(ponto, 3, 0);
+    lv_obj_set_style_bg_color(ponto, C_OLIVA, 0);
+    lv_obj_set_style_bg_opa(ponto, LV_OPA_COVER, 0);
+    texto(tag, "RECADO DA LYLU", f_negrito_p, C_OLIVA);
+
+    rec_titulo = texto(t, "", f_negrito_g, C_TINTA);
+    lv_obj_set_pos(rec_titulo, 44, 110);
+    rec_sub = texto(t, "", f_corpo_p, C_FRACO);
+    lv_obj_set_width(rec_sub, 560);
+    lv_label_set_long_mode(rec_sub, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(rec_sub, 44, 160);
+
+    // Cartão e rodapé numa coluna: o rodapé desce sozinho quando o cartão cresce.
+    lv_obj_t *col = caixa(t);
+    lv_obj_set_pos(col, 44, 206);
+    lv_obj_set_width(col, 560);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(col, 18, 0);
+    lv_obj_t *c = rec_cartao = cartao(col);
+    lv_obj_set_style_radius(c, 18, 0);
+    lv_obj_set_width(c, LV_PCT(100));
+    lv_obj_set_style_pad_hor(c, 28, 0);
+    lv_obj_set_style_pad_ver(c, 24, 0);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(c, 6, 0);
+
+    lv_obj_t *topo = caixa(c);
+    lv_obj_set_width(topo, LV_PCT(100));
+    lv_obj_set_flex_flow(topo, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(topo, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_margin_bottom(topo, 14, 0);
+    rec_quando = texto(topo, "", f_negrito_p, C_OLIVA);
+    lv_obj_t *pilula = caixa(topo);
+    lv_obj_set_style_bg_color(pilula, C_LINHA, 0);
+    lv_obj_set_style_bg_opa(pilula, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(pilula, 99, 0);
+    lv_obj_set_style_pad_hor(pilula, 10, 0);
+    lv_obj_set_style_pad_ver(pilula, 3, 0);
+    rec_tipo = texto(pilula, "", f_corpo_p, C_OLIVA);
+
+    rec_nome = texto(c, "", f_negrito_m, C_TINTA);
+    lv_obj_set_width(rec_nome, LV_PCT(100));
+    lv_label_set_long_mode(rec_nome, LV_LABEL_LONG_WRAP);
+    rec_detalhe = texto(c, "", f_corpo, C_FRACO);
+    lv_obj_set_width(rec_detalhe, LV_PCT(100));
+    lv_label_set_long_mode(rec_detalhe, LV_LABEL_LONG_WRAP);
+
+    lv_obj_t *bts = caixa(c);
+    lv_obj_set_flex_flow(bts, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(bts, 12, 0);
+    lv_obj_set_style_margin_top(bts, 20, 0);
+    botao(bts, "Entendi", true, ev_recado_entendi);
+    lv_obj_t *depois = botao(bts, "Lembrar depois", false, ev_recado_depois);
+    lv_obj_set_style_border_color(depois, C_LINHA, 0);   // em cima do cartão, sem borda ele sumia
+    lv_obj_set_style_border_width(depois, 1, 0);
+
+    rec_rodape = texto(col, "Um recado por vez. O resto espera.", f_corpo_p, C_FRACO);
+
+    rec_balao = balao(t, 652, 72, 290);
+}
+
+static void atualiza_recados(void)
+{
+    if (!recados_pendentes()) {
+        lv_label_set_text(rec_titulo, "Nenhum recado agora");
+        lv_label_set_text(rec_sub, "Quando aparecer alguma coisa, eu guardo aqui pra você.");
+        lv_obj_add_flag(rec_cartao, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(rec_rodape, LV_OBJ_FLAG_HIDDEN);
+        balao_fala(rec_balao, "Tudo guardado.", "Pode descansar a cabeça.");
+        return;
+    }
+    recado_t *r = &recados[recado_atual];
+    char s[64];
+    snprintf(s, sizeof s, "Tem uma coisa pra %s", r->dia);
+    lv_label_set_text(rec_titulo, s);
+    lv_label_set_text(rec_sub, "Eu guardei aqui pra você não precisar guardar na cabeça.");
+    lv_obj_remove_flag(rec_cartao, LV_OBJ_FLAG_HIDDEN);
+    snprintf(s, sizeof s, "%s · %s", r->dia_maiusc, r->hora);
+    lv_label_set_text(rec_quando, s);
+    lv_label_set_text(rec_tipo, r->tipo);
+    lv_label_set_text(rec_nome, r->titulo);
+    lv_label_set_text(rec_detalhe, r->detalhe);
+
+    int n = recados_pendentes();
+    if (n > 1) {
+        snprintf(s, sizeof s, "Um recado por vez. Tem mais %d esperando.", n - 1);
+        lv_label_set_text(rec_rodape, s);
+    } else lv_label_set_text(rec_rodape, "Um recado por vez. O resto espera.");
+    lv_obj_remove_flag(rec_rodape, LV_OBJ_FLAG_HIDDEN);
+
+    if (recado_adiado) balao_fala(rec_balao, "Tá bom.", "Eu te lembro mais tarde.");
+    else balao_fala(rec_balao, r->fala, r->fala_forte);
+}
+
 // ---------------------------------------------------------------- CASA
 static struct { float x, alvo; anim_t fazendo; int64_t ate; } casa = { 360, 360, A_LENDO, 0 };
 static const anim_t ATIVIDADES[] = { A_LENDO, A_CAFE, A_BOLHAS, A_BRINCANDO, A_BOCEJANDO, A_DORMINDO, A_AGUA, A_NINTENDO };
@@ -1758,12 +1917,19 @@ static void cria_wifi(void)
     wf_teclado = wf_tc.bm;
 }
 
-// A rede avisa da thread de eventos do ESP-IDF, não da thread da tela.
-static void ev_rede(void)
+// A rede avisa da thread de eventos do ESP-IDF, não da thread da tela. Esperar
+// a trava da tela aqui (lvgl_port_lock espera para sempre) segurava a thread de
+// eventos do Wi-Fi inteira enquanto a tela desenhava — e com telas pesadas o
+// DHCP não fechava: associava e o IP nunca chegava. Agora ela só levanta uma
+// bandeira, e um timer da própria tela olha a bandeira.
+static volatile bool rede_mudou;
+static void ev_rede(void) { rede_mudou = true; }
+
+static void olha_rede(lv_timer_t *t)
 {
-    if (!placa_trava()) return;
-    lv_async_call(atualizar_depois, NULL);   // fora do evento: a tela se refaz inteira
-    placa_destrava();
+    if (!rede_mudou) return;
+    rede_mudou = false;
+    atualizar();
 }
 
 // ---------------------------------------------------------------- MICROFONE
@@ -1956,6 +2122,7 @@ static const char *humor(lv_color_t *cor)
         }
     }
     if (missao_completa()) { *cor = C_AMBAR; return "comemorando"; }
+    if (tela_atual == T_RECADOS) { *cor = C_CEU; return "cuidadora"; }
     if (tela_atual == T_CASA || tela_atual == T_RELOGIO) { *cor = C_LILAS; return "brincalhona"; }
     *cor = C_OLIVA; return "animada";
 }
@@ -1980,6 +2147,7 @@ static void atualizar(void)
     }
 
     atualiza_tarefas();
+    atualiza_recados();
     atualiza_pomodoro();
     atualiza_linha_wifi();
     atualiza_linha_mic();
@@ -1989,6 +2157,7 @@ static void atualizar(void)
 
     switch (tela_atual) {
     case T_FOCO:    lylu_na_tela(T_FOCO, 640, 196); lylu_mostra(anim_foco()); break;
+    case T_RECADOS: lylu_na_tela(T_RECADOS, 672, 178); lylu_mostra(A_FALA); break;
     case T_TAREFAS: lylu_na_tela(T_TAREFAS, 20, 200);
                     lylu_mostra(missao_completa() ? A_COMEMORANDO : dificil ? A_CUIDADORA : A_APONTANDO); break;
     case T_CASA:    lylu_na_tela(T_CASA, (int)casa.x, CASA_Y); lylu_mostra(casa.fazendo); break;
@@ -2003,6 +2172,7 @@ static void ev_troca_tela(lv_event_t *e)
 {
     lv_obj_t *ativa = lv_tileview_get_tile_active(tv);
     for (int i = 0; i < N_TELAS; i++) if (tiles[i] == ativa) tela_atual = i;
+    recado_adiado = false;   // o "tá bom, te lembro depois" vale só pra quem acabou de tocar
     atualizar();
 }
 
@@ -2091,6 +2261,7 @@ void app_main(void)
     cria_pontos();
     cria_pomodoro(tiles[T_FOCO]);
     cria_tarefas(tiles[T_TAREFAS]);
+    cria_recados(tiles[T_RECADOS]);
     cria_casa(tiles[T_CASA]);
     cria_relogio(tiles[T_RELOGIO]);
     cria_semana(tiles[T_SEMANA]);
@@ -2114,6 +2285,7 @@ void app_main(void)
     lv_timer_create(passo_casa, 33, NULL);
     lv_timer_create(passo_microfone, 60, NULL);
     lv_timer_create(sinal_pinta, 350, NULL);
+    lv_timer_create(olha_rede, 200, NULL);
     placa_destrava();
 
     audio_iniciar();         // ES8311: se não responder, ela segue surda e nada quebra

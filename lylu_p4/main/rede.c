@@ -6,6 +6,7 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_timer.h"
@@ -106,6 +107,25 @@ static void conta_o_dhcp(const char *quando)
     esp_netif_get_ip_info(nif, &ip);
     // 0 = nem começou, 1 = rodando, 2 = parado
     ESP_LOGI(TAG, "%s: dhcp=%d ip=" IPSTR, quando, (int)st, IP2STR(&ip.ip));
+
+}
+
+// A interface de rede do lado de cá precisa usar o MAC do C6: é para ele que o
+// roteador responde. Quem copia o MAC é o próprio ESP-IDF ao ligar o Wi-Fi, com
+// uma pergunta ao C6 pelo SDIO — e com o ESP-Hosted 2.3.0 antigo essa resposta
+// às vezes se perde. A interface ficava com 00:00:00:00:00:00, associava na rede
+// e o DHCP nunca voltava. Dependia do tempo do boot, por isso parecia que "mudar
+// as telas derrubava a internet". Então a gente confere e, se precisar, acerta.
+static void acerta_o_mac(const char *quando)
+{
+    esp_netif_t *nif = minha_interface();
+    uint8_t da_interface[6] = { 0 }, do_c6[6] = { 0 };
+    if (!nif || esp_wifi_get_mac(WIFI_IF_STA, do_c6) != ESP_OK) return;
+    esp_netif_get_mac(nif, da_interface);
+    if (!memcmp(da_interface, do_c6, sizeof do_c6)) return;
+    ESP_LOGW(TAG, "%s: a interface estava com MAC " MACSTR ", acertando para " MACSTR,
+             quando, MAC2STR(da_interface), MAC2STR(do_c6));
+    esp_netif_set_mac(nif, do_c6);
 }
 
 // Se passaram segundos e nada, cutuca o DHCP na mão. O retorno já diz o estado:
@@ -113,6 +133,7 @@ static void conta_o_dhcp(const char *quando)
 static void cutuca_o_dhcp(void *p)
 {
     if (meu_ip[0]) return;
+    acerta_o_mac("passados 6s");
     conta_o_dhcp("passados 6s");
     esp_netif_t *nif = minha_interface();
     if (nif) ESP_LOGI(TAG, "dhcpc_start -> %s", esp_err_to_name(esp_netif_dhcpc_start(nif)));
@@ -213,6 +234,7 @@ static void ev_wifi(void *arg, esp_event_base_t base, int32_t id, void *dados)
 
     switch (id) {
     case WIFI_EVENT_STA_START:
+        acerta_o_mac("ao ligar");
         if (tem_salva) { muda(REDE_CONECTANDO); esp_wifi_connect(); }
         else muda(REDE_PARADA);
         avisa();
@@ -228,6 +250,7 @@ static void ev_wifi(void *arg, esp_event_base_t base, int32_t id, void *dados)
     case WIFI_EVENT_STA_CONNECTED:
         saida_nossa = false;        // entrou: a saída anterior já é história
         ESP_LOGI(TAG, "associada em \"%s\" — agora falta o IP", alvo_nome);
+        acerta_o_mac("ao associar");
         conta_o_dhcp("ao associar");
         if (!relogio_dhcp) {
             esp_timer_create_args_t a = { .callback = cutuca_o_dhcp, .name = "dhcp" };
