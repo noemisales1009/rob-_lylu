@@ -1,4 +1,9 @@
 # Nome,    Tipo, Subtipo, Offset,  Tamanho
 nvs,       data, nvs,     0x9000,  0x6000
 phy_init,  data, phy,     0xf000,  0x1000
-factory,   app,  factory, 0x10000, 0xC00000
+# O programa comeca em 0x400000, e nao logo depois (0x10000), de proposito: a
+# flash desta placa tem um trecho ruim perto de 0x300000 (achado em 28/09/2026).
+# Gravar ali trava o chip no meio ("The chip stopped responding"), com qualquer
+# conteudo, enquanto os mesmos dados gravam perfeito em 0x900000. Ler e apagar
+# o trecho funciona; so a gravacao falha. De 0x10000 a 0x400000 fica sem uso.
+factory,   app,  factory, 0x400000, 0xC00000

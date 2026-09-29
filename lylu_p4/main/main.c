@@ -13,6 +13,8 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "lvgl.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "gif/lv_gif_private.h"   // copia corrigida do GIF da LVGL (ver gif/gifdec.c)
 #include "audio.h"
 #include "placa.h"
@@ -21,16 +23,20 @@
 static const char *TAG = "lylu";
 
 // ---------------------------------------------------------------- cores
-#define C_FUNDO   lv_color_hex(0x1d1b26)
-#define C_CARTAO  lv_color_hex(0x292636)
-#define C_LINHA   lv_color_hex(0x3b3752)
-#define C_TINTA   lv_color_hex(0xf1eef8)
-#define C_FRACO   lv_color_hex(0xa39db8)
-#define C_OLIVA   lv_color_hex(0xb8c55c)
+// Verde-noite: fundo escuro puxado pro verde; cartões e balão um tom acima;
+// botões no oliva. O fundo é liso de propósito: a tela tem 16 bits de cor, e
+// um degradê nesses tons escuros vira faixas verticais de cores diferentes.
+#define C_FUNDO   lv_color_hex(0x112119)
+#define C_CARTAO  lv_color_hex(0x182d25)
+#define C_BALAO   lv_color_hex(0x1f3a30)
+#define C_LINHA   lv_color_hex(0x2b4a3e)
+#define C_TINTA   lv_color_hex(0xeef3ec)
+#define C_FRACO   lv_color_hex(0x93a99c)
+#define C_OLIVA   lv_color_hex(0xbfd384)
 #define C_AMBAR   lv_color_hex(0xf4b860)
 #define C_CEU     lv_color_hex(0x8ec5ff)
 #define C_LILAS   lv_color_hex(0xb9a6ff)
-#define C_ESCURO  lv_color_hex(0x1f2310)
+#define C_ESCURO  lv_color_hex(0x1b2612)
 
 // ---------------------------------------------------------------- arquivos embutidos
 #define EMB(nome) extern const uint8_t nome##_start[] asm("_binary_" #nome "_start"); \
@@ -40,12 +46,13 @@ EMB(apontando_lista_gif) EMB(cuidadora_v2_gif) EMB(rindo_carinho_frente_gif)
 EMB(andando_direita_v2_gif) EMB(andando_esquerda_v2_gif) EMB(lendo_frente_gif)
 EMB(soprando_bolhas_frente_gif) EMB(brincando_frente_gif) EMB(bocejando_frente_gif)
 EMB(dormindo_frente_gif) EMB(tomando_agua_frente_gif) EMB(jogando_nintendo_frente_gif)
+EMB(lylu_fala_gif)
 EMB(corpo_ttf) EMB(corpo_negrito_ttf) EMB(pixel_ttf)
 
 typedef enum {
     A_CONCENTRADA, A_COMEMORANDO, A_PENSANDO, A_CAFE, A_APONTANDO, A_CUIDADORA, A_RINDO,
     A_ANDA_DIR, A_ANDA_ESQ, A_LENDO, A_BOLHAS, A_BRINCANDO, A_BOCEJANDO, A_DORMINDO,
-    A_AGUA, A_NINTENDO, A_TOTAL
+    A_AGUA, A_NINTENDO, A_FALA, A_TOTAL
 } anim_t;
 
 static lv_image_dsc_t GIF[A_TOTAL];
@@ -66,10 +73,11 @@ static void carrega_gifs(void)
     REG(A_BOLHAS, soprando_bolhas_frente_gif); REG(A_BRINCANDO, brincando_frente_gif);
     REG(A_BOCEJANDO, bocejando_frente_gif); REG(A_DORMINDO, dormindo_frente_gif);
     REG(A_AGUA, tomando_agua_frente_gif); REG(A_NINTENDO, jogando_nintendo_frente_gif);
+    REG(A_FALA, lylu_fala_gif);
 }
 
 // ---------------------------------------------------------------- fontes
-static lv_font_t *f_corpo, *f_corpo_p, *f_corpo_g, *f_negrito, *f_px_p, *f_px_m, *f_px_g, *f_px_relogio, *f_px_foco;
+static lv_font_t *f_corpo, *f_corpo_p, *f_corpo_g, *f_negrito, *f_negrito_g, *f_px_p, *f_px_m, *f_px_g, *f_px_relogio, *f_px_foco;
 
 static lv_font_t *ttf(const uint8_t *ini, const uint8_t *fim, int tam)
 {
@@ -82,6 +90,7 @@ static void carrega_fontes(void)
     f_corpo   = ttf(corpo_ttf_start, corpo_ttf_end, 20);
     f_corpo_g = ttf(corpo_ttf_start, corpo_ttf_end, 30);
     f_negrito = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 22);
+    f_negrito_g = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 34);
     f_px_p    = ttf(pixel_ttf_start, pixel_ttf_end, 20);
     f_px_m    = ttf(pixel_ttf_start, pixel_ttf_end, 38);
     f_px_g    = ttf(pixel_ttf_start, pixel_ttf_end, 60);
@@ -101,8 +110,14 @@ static tarefa_t bonus[]  = { { "Responder os e-mails", true }, { "Organizar a me
 static bool dificil = false, cortada = false;
 static int64_t carinho_ate = 0;
 
-#define FOCO_TOTAL (25 * 60)
-static struct { bool rodando, acabou; int resto, blocos; } foco = { false, false, FOCO_TOTAL, 1 };
+// O pomodoro da tela da frente anda em quatro passos (ver POMODORO).
+typedef enum { P_ESCOLHER, P_CONFIGURAR, P_FOCO, P_PAUSA } passo_t;
+static passo_t passo = P_ESCOLHER;
+typedef struct { uint8_t foco, curta, blocos, longa, sozinha; } pomo_t;   // minutos; "avançar sozinha"
+static pomo_t pomo = { 25, 5, 4, 20, 1 };
+static char tarefa_atual[64] = "O que você quiser";
+static struct { bool rodando; int resto, bloco, feitos; } foco = { false, 25 * 60, 1, 0 };
+static struct { bool rodando, longa; int resto, cuidado; } pausa = { false, false, 5 * 60, -1 };
 
 enum { T_FOCO, T_TAREFAS, T_CASA, T_RELOGIO, T_SEMANA, T_AJUSTES, N_TELAS };
 static int tela_atual = T_FOCO;
@@ -122,7 +137,6 @@ static lv_obj_t *tv, *tiles[N_TELAS], *pontos[N_TELAS], *caixa_pontos;
 static lv_obj_t *lylu, *lylu_outra;  // dois GIFs que se revezam; ver lylu_mostra()
 static anim_t lylu_anim = A_TOTAL;
 static lv_obj_t *st_hora, *st_missao, *st_humor, *st_humor_ponto, *st_gentil;
-static lv_obj_t *foco_arco, *foco_num, *foco_sub, *foco_tarefa, *foco_btn, *foco_btn_txt, *foco_parar, *foco_blocos, *foco_balao;
 static lv_obj_t *tar_balao, *lista_missao, *lista_bonus, *caixa_bonus, *btn_cortar;
 static lv_obj_t *rel_hora, *rel_seg, *rel_data;
 static lv_obj_t *aj_dificil;
@@ -157,23 +171,59 @@ static lv_obj_t *balao(lv_obj_t *pai, int x, int y, int largura)
 {
     lv_obj_t *b = caixa(pai);
     lv_obj_set_pos(b, x, y);
-    lv_obj_set_style_bg_color(b, C_TINTA, 0);
+    lv_obj_set_style_bg_color(b, C_BALAO, 0);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(b, 14, 0);
     lv_obj_set_style_pad_hor(b, 18, 0);
     lv_obj_set_style_pad_ver(b, 14, 0);
     lv_obj_set_style_shadow_width(b, 0, 0);
-    lv_obj_t *l = texto(b, "", f_corpo, lv_color_hex(0x1d1b26));
-    lv_obj_set_width(l, largura);
-    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(b, 2, 0);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    // A fala e, embaixo e em negrito, o pedaço que ela quer que fique.
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *l = texto(b, "", i ? f_negrito : f_corpo, C_TINTA);
+        lv_obj_set_width(l, largura);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    }
+    // O biquinho, em degraus, logo abaixo da borda. Girar um quadrado ficaria mais
+    // liso, mas objeto girado vira uma camada extra redesenhada a cada quadro — e
+    // o arrastar entre as telas engasgava.
+    lv_obj_t *bico = caixa(b);
+    lv_obj_add_flag(bico, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(bico, 18, 15);
+    lv_obj_align(bico, LV_ALIGN_BOTTOM_RIGHT, -60, 14 + 15);   // 14 = o respiro de baixo
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *d = caixa(bico);
+        lv_obj_set_size(d, 18 - i * 6, 5);
+        lv_obj_set_pos(d, i * 3, i * 5);
+        lv_obj_set_style_bg_color(d, C_BALAO, 0);
+        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
+    }
     return b;
 }
 
-static void balao_texto(lv_obj_t *b, const char *s)
+static void balao_fala(lv_obj_t *b, const char *s, const char *forte)
 {
     if (!s || !*s) { lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN); return; }
     lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(lv_obj_get_child(b, 0), s);
+    lv_obj_t *l = lv_obj_get_child(b, 1);
+    if (forte && *forte) { lv_label_set_text(l, forte); lv_obj_remove_flag(l, LV_OBJ_FLAG_HIDDEN); }
+    else lv_obj_add_flag(l, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void balao_texto(lv_obj_t *b, const char *s) { balao_fala(b, s, NULL); }
+
+static lv_obj_t *cartao(lv_obj_t *pai)
+{
+    lv_obj_t *c = caixa(pai);
+    lv_obj_set_style_bg_color(c, C_CARTAO, 0);
+    lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(c, C_LINHA, 0);
+    lv_obj_set_style_border_width(c, 1, 0);
+    lv_obj_set_style_radius(c, 14, 0);
+    return c;
 }
 
 static lv_obj_t *botao(lv_obj_t *pai, const char *s, bool principal, lv_event_cb_t cb)
@@ -422,34 +472,572 @@ static void cria_pontos(void)
     }
 }
 
-// ---------------------------------------------------------------- FOCO
-static void ev_foco_btn(lv_event_t *e)
+// ---------------------------------------------------------------- o teclado
+// O teclado pronto da LVGL marca as teclas de comando com símbolos da fonte
+// Montserrat, que as fontes TTF da Lylu não têm — sairia um quadradinho vazio.
+// Então o mapa é nosso, escrito em português, num lv_buttonmatrix puro.
+#define T_SO_UM LV_BUTTONMATRIX_CTRL_NO_REPEAT
+#define T_VERDE LV_BUTTONMATRIX_CTRL_CHECKED
+
+static const char *TECLAS_MIN[] = {
+    "1","2","3","4","5","6","7","8","9","0","\n",
+    "q","w","e","r","t","y","u","i","o","p","\n",
+    "a","s","d","f","g","h","j","k","l","Apagar","\n",
+    "ABC","z","x","c","v","b","n","m",".","-","\n",
+    "#+="," ","Cancelar","Conectar","" };
+
+static const char *TECLAS_MAI[] = {
+    "1","2","3","4","5","6","7","8","9","0","\n",
+    "Q","W","E","R","T","Y","U","I","O","P","\n",
+    "A","S","D","F","G","H","J","K","L","Apagar","\n",
+    "abc","Z","X","C","V","B","N","M","_","+","\n",
+    "#+="," ","Cancelar","Conectar","" };
+
+static const char *TECLAS_SIMB[] = {
+    "1","2","3","4","5","6","7","8","9","0","\n",
+    "!","@","#","$","%","&","*","(",")","_","\n",
+    "-","+","=","/","\\",":",";","?","^","Apagar","\n",
+    "\"","'","[","]","{","}","<",">","|","~","\n",
+    "abc"," ","Cancelar","Conectar","" };
+
+static const lv_buttonmatrix_ctrl_t TECLAS_LARGURA[] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 2,            // "Apagar" ocupa duas
+    1 | T_SO_UM, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // a tecla de trocar o mapa
+    2 | T_SO_UM, 4, 2 | T_SO_UM, 3 | T_SO_UM | T_VERDE };
+
+#define N_TECLAS (sizeof TECLAS_MIN / sizeof *TECLAS_MIN)
+
+// Cada teclado tem a sua cópia dos mapas porque a tecla verde diz o que vai
+// acontecer: "Conectar" no Wi-Fi, "Usar esta" na tarefa.
+typedef struct {
+    lv_obj_t *bm, *campo;
+    const char *ok_txt;
+    const char *mapa[3][N_TECLAS];
+    void (*ok)(void), (*cancela)(void);
+} teclado_t;
+
+static void teclado_mapa(teclado_t *tc, int m)
 {
-    if (foco.acabou) { foco.resto = FOCO_TOTAL; foco.acabou = false; }
-    foco.rodando = !foco.rodando;
+    lv_buttonmatrix_set_map(tc->bm, tc->mapa[m]);
+    lv_buttonmatrix_set_ctrl_map(tc->bm, TECLAS_LARGURA);   // o set_map zera as larguras
+}
+
+static void ev_tecla(lv_event_t *e)
+{
+    teclado_t *tc = lv_event_get_user_data(e);
+    uint32_t i = lv_buttonmatrix_get_selected_button(tc->bm);
+    const char *t = lv_buttonmatrix_get_button_text(tc->bm, i);
+    if (!t) return;
+    if      (!strcmp(t, "ABC"))      teclado_mapa(tc, 1);
+    else if (!strcmp(t, "abc"))      teclado_mapa(tc, 0);
+    else if (!strcmp(t, "#+="))      teclado_mapa(tc, 2);
+    else if (!strcmp(t, "Apagar"))   lv_textarea_delete_char(tc->campo);
+    else if (!strcmp(t, "Cancelar")) tc->cancela();
+    else if (!strcmp(t, tc->ok_txt)) tc->ok();
+    else lv_textarea_add_text(tc->campo, t);
+}
+
+static void teclado_cria(teclado_t *tc, lv_obj_t *pai, int y, const char *ok_txt)
+{
+    const char **base[3] = { TECLAS_MIN, TECLAS_MAI, TECLAS_SIMB };
+    tc->ok_txt = ok_txt;
+    for (int m = 0; m < 3; m++)
+        for (size_t k = 0; k < N_TECLAS; k++)
+            tc->mapa[m][k] = strcmp(base[m][k], "Conectar") ? base[m][k] : ok_txt;
+
+    lv_obj_t *bm = tc->bm = lv_buttonmatrix_create(pai);
+    lv_obj_set_size(bm, TELA_W, 268);
+    lv_obj_set_pos(bm, 0, y);
+    lv_buttonmatrix_set_one_checked(bm, false);
+    lv_obj_set_style_bg_opa(bm, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(bm, 0, 0);
+    lv_obj_set_style_pad_all(bm, 8, 0);
+    lv_obj_set_style_pad_row(bm, 8, 0);
+    lv_obj_set_style_pad_column(bm, 8, 0);
+    lv_obj_set_style_bg_color(bm, C_CARTAO, LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(bm, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_radius(bm, 10, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_width(bm, 0, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(bm, C_TINTA, LV_PART_ITEMS);
+    lv_obj_set_style_text_font(bm, f_corpo, LV_PART_ITEMS);
+    lv_obj_set_style_bg_color(bm, C_LINHA, LV_PART_ITEMS | LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(bm, C_OLIVA, LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_set_style_text_color(bm, C_ESCURO, LV_PART_ITEMS | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(bm, ev_tecla, LV_EVENT_VALUE_CHANGED, tc);
+    teclado_mapa(tc, 0);
+}
+
+// Várias telas se refazem inteiras, inclusive o botão tocado: redesenha só
+// depois que o toque termina.
+static void atualizar_depois(void *p) { atualizar(); }
+
+// ---------------------------------------------------------------- POMODORO
+// A tela da frente é um caminho de quatro passos: escolher a tarefa, ajustar os
+// tempos (só se quiser, pela engrenagem), focar e pausar. Cada passo é um painel
+// à esquerda; a Lylu e o balão ficam à direita e só mudam de fala.
+static lv_obj_t *painel[4], *p_balao, *p_engrenagem, *p_mesa;
+static lv_obj_t *esc_lista, *esc_campo_txt;
+static char esc_texto[64];
+static lv_obj_t *cfg_valor[4], *cfg_sozinha;
+static pomo_t pomo_editando;
+static passo_t passo_antes_cfg = P_FOCO;
+static lv_obj_t *foco_arco, *foco_num, *foco_sub, *foco_tarefa, *foco_btn_txt, *foco_parar, *foco_blocos;
+static lv_obj_t *pau_selo, *pau_num, *pau_nome, *pau_btn_txt, *pau_cuidado[3];
+static lv_obj_t *dg_tela, *dg_campo;
+static teclado_t dg_tc;
+
+static void vai_para(passo_t p) { passo = p; lv_async_call(atualizar_depois, NULL); }
+
+// ---- os tempos guardados ----
+#define NVS_POMO "pomodoro"
+
+static void pomo_carrega(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lylu", NVS_READONLY, &h) != ESP_OK) return;   // nunca salvou: fica o padrão
+    pomo_t p;
+    size_t n = sizeof p;
+    if (nvs_get_blob(h, NVS_POMO, &p, &n) == ESP_OK && n == sizeof p && p.foco && p.blocos) pomo = p;
+    nvs_close(h);
+    foco.resto = pomo.foco * 60;
+}
+
+static void pomo_guarda(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lylu", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, NVS_POMO, &pomo, sizeof pomo);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// ---- de um passo pro outro ----
+static void fim_do_foco(void)
+{
+    foco.rodando = false;
+    foco.feitos++;
+    pausa.longa = foco.bloco >= pomo.blocos;
+    pausa.resto = (pausa.longa ? pomo.longa : pomo.curta) * 60;
+    pausa.rodando = pomo.sozinha;
+    pausa.cuidado = -1;
+    passo = P_PAUSA;
     atualizar();
 }
+
+static void fim_da_pausa(void)
+{
+    pausa.rodando = false;
+    foco.bloco = pausa.longa ? 1 : foco.bloco + 1;
+    foco.resto = pomo.foco * 60;
+    foco.rodando = pomo.sozinha;
+    passo = P_FOCO;
+    atualizar();
+}
+
+// ---- 1. escolher a tarefa ----
+static void ev_escolhe(lv_event_t *e)
+{
+    tarefa_t *t = lv_event_get_user_data(e);
+    strlcpy(tarefa_atual, t->t, sizeof tarefa_atual);
+    vai_para(P_FOCO);
+}
+
+static void ev_usar_esta(lv_event_t *e)
+{
+    strlcpy(tarefa_atual, esc_texto[0] ? esc_texto : "O que você quiser", sizeof tarefa_atual);
+    vai_para(P_FOCO);
+}
+
+static void cartao_tarefa(tarefa_t *t, bool da_missao)
+{
+    lv_obj_t *c = cartao(esc_lista);
+    lv_obj_set_width(c, LV_PCT(100));
+    lv_obj_set_style_pad_hor(c, 18, 0);
+    lv_obj_set_style_pad_ver(c, 12, 0);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(c, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(c, 16, 0);
+    lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_border_color(c, C_OLIVA, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(c, ev_escolhe, LV_EVENT_CLICKED, t);
+
+    lv_obj_t *cx = caixa(c);
+    lv_obj_set_size(cx, 26, 26);
+    lv_obj_set_style_radius(cx, 7, 0);
+    lv_obj_set_style_border_width(cx, 2, 0);
+    lv_obj_set_style_border_color(cx, C_FRACO, 0);
+
+    lv_obj_t *col = caixa(c);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    texto(col, da_missao ? "Missão do dia" : "Bônus, se der", f_corpo_p, C_FRACO);
+    lv_obj_t *nome = texto(col, t->t, f_negrito, C_TINTA);
+    lv_obj_set_width(nome, 420);
+    lv_label_set_long_mode(nome, LV_LABEL_LONG_DOT);
+
+    if (da_missao) {
+        lv_obj_t *pr = caixa(c);
+        lv_obj_set_style_bg_color(pr, C_LINHA, 0);
+        lv_obj_set_style_bg_opa(pr, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(pr, 8, 0);
+        lv_obj_set_style_pad_hor(pr, 10, 0);
+        lv_obj_set_style_pad_ver(pr, 3, 0);
+        texto(pr, "P1", f_corpo_p, C_TINTA);
+    }
+}
+
+static void atualiza_escolher(void)
+{
+    lv_obj_clean(esc_lista);
+    int n = 0;
+    for (int i = 0; i < n_missao() && n < 3; i++)
+        if (!missao[i].f) { cartao_tarefa(&missao[i], true); n++; }
+    for (int i = 0; i < (int)N_BONUS && n < 2 && !dificil; i++)   // no dia difícil, só a missão
+        if (!bonus[i].f) { cartao_tarefa(&bonus[i], false); n++; }
+    if (!n) {
+        lv_obj_t *l = texto(esc_lista, "A missão de hoje já foi. Se quiser mais uma coisa, escreve aqui embaixo.",
+                            f_corpo, C_FRACO);
+        lv_obj_set_width(l, LV_PCT(100));
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    }
+    lv_label_set_text(esc_campo_txt, esc_texto[0] ? esc_texto : "O que você quiser");
+    lv_obj_set_style_text_color(esc_campo_txt, esc_texto[0] ? C_TINTA : C_FRACO, 0);
+}
+
+// Digitar a tarefa: uma tela por cima, como a senha do Wi-Fi.
+static void ev_abre_digitar(lv_event_t *e)
+{
+    lv_textarea_set_text(dg_campo, esc_texto);
+    lv_obj_add_state(dg_campo, LV_STATE_FOCUSED);
+    teclado_mapa(&dg_tc, 0);
+    lv_obj_remove_flag(dg_tela, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(caixa_pontos, LV_OBJ_FLAG_HIDDEN);   // aqui não se arrasta pro lado
+}
+
+static void fecha_digitar(void)
+{
+    lv_obj_add_flag(dg_tela, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(caixa_pontos, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void digitar_ok(void)
+{
+    strlcpy(esc_texto, lv_textarea_get_text(dg_campo), sizeof esc_texto);
+    fecha_digitar();
+    if (esc_texto[0]) { strlcpy(tarefa_atual, esc_texto, sizeof tarefa_atual); vai_para(P_FOCO); }
+    else lv_async_call(atualizar_depois, NULL);
+}
+
+static void digitar_cancela(void) { fecha_digitar(); }
+
+static void cria_digitar(void)
+{
+    dg_tela = caixa(lv_layer_top());
+    lv_obj_set_size(dg_tela, TELA_W, TELA_H - 44);
+    lv_obj_set_pos(dg_tela, 0, 44);
+    lv_obj_set_style_bg_color(dg_tela, C_FUNDO, 0);
+    lv_obj_set_style_bg_opa(dg_tela, LV_OPA_COVER, 0);
+    lv_obj_add_flag(dg_tela, LV_OBJ_FLAG_CLICKABLE);    // segura o arrastar do tileview
+    lv_obj_add_flag(dg_tela, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *l = texto(dg_tela, "O que você vai fazer agora?", f_negrito_g, C_TINTA);
+    lv_obj_set_pos(l, 34, 24);
+    l = texto(dg_tela, "Uma coisa só, do jeito que vier. Não precisa ser bonito.", f_corpo, C_FRACO);
+    lv_obj_set_pos(l, 34, 72);
+
+    dg_campo = lv_textarea_create(dg_tela);
+    lv_textarea_set_one_line(dg_campo, true);
+    lv_textarea_set_max_length(dg_campo, sizeof esc_texto - 1);
+    lv_obj_set_size(dg_campo, 800, 64);
+    lv_obj_set_pos(dg_campo, 34, 120);
+    lv_textarea_set_placeholder_text(dg_campo, "O que você quiser");
+    lv_obj_set_style_bg_color(dg_campo, C_CARTAO, 0);
+    lv_obj_set_style_border_color(dg_campo, C_LINHA, 0);
+    lv_obj_set_style_border_width(dg_campo, 2, 0);
+    lv_obj_set_style_radius(dg_campo, 12, 0);
+    lv_obj_set_style_text_color(dg_campo, C_TINTA, 0);
+    lv_obj_set_style_text_font(dg_campo, f_corpo_g, 0);
+
+    dg_tc.campo = dg_campo;
+    dg_tc.ok = digitar_ok;
+    dg_tc.cancela = digitar_cancela;
+    teclado_cria(&dg_tc, dg_tela, 288, "Usar esta");
+}
+
+// ---- 2. configurar ----
+static const struct { const char *nome, *sub, *un; uint8_t min, max, passo; } AJUSTE[4] = {
+    { "Tempo de foco",          "Trabalho sem interrupção", " min", 5, 90, 5 },
+    { "Pausa curta",            "Depois de cada bloco",     " min", 1, 30, 1 },
+    { "Blocos até pausa longa", "Ciclo completo",           "",     1,  8, 1 },
+    { "Pausa longa",            "Depois do último bloco",   " min", 5, 60, 5 },
+};
+
+static uint8_t *ajuste_valor(int i)
+{
+    switch (i) {
+    case 0:  return &pomo_editando.foco;
+    case 1:  return &pomo_editando.curta;
+    case 2:  return &pomo_editando.blocos;
+    default: return &pomo_editando.longa;
+    }
+}
+
+static void atualiza_config(void)
+{
+    char s[16];
+    for (int i = 0; i < 4; i++) {
+        snprintf(s, sizeof s, "%d%s", *ajuste_valor(i), AJUSTE[i].un);
+        lv_label_set_text(cfg_valor[i], s);
+    }
+}
+
+static void ev_ajusta(lv_event_t *e)
+{
+    int k = (int)(intptr_t)lv_event_get_user_data(e), i = k / 2;
+    uint8_t *v = ajuste_valor(i);
+    int n = *v + (k % 2 ? AJUSTE[i].passo : -AJUSTE[i].passo);
+    if (n < AJUSTE[i].min) n = AJUSTE[i].min;
+    if (n > AJUSTE[i].max) n = AJUSTE[i].max;
+    *v = n;
+    atualiza_config();
+}
+
+static void ev_engrenagem(lv_event_t *e)
+{
+    pomo_editando = pomo;
+    if (pomo.sozinha) lv_obj_add_state(cfg_sozinha, LV_STATE_CHECKED);
+    else lv_obj_remove_state(cfg_sozinha, LV_STATE_CHECKED);
+    passo_antes_cfg = passo;
+    vai_para(P_CONFIGURAR);
+}
+
+static void ev_cfg_salvar(lv_event_t *e)
+{
+    pomo_editando.sozinha = lv_obj_has_state(cfg_sozinha, LV_STATE_CHECKED);
+    pomo = pomo_editando;
+    pomo_guarda();
+    foco.resto = pomo.foco * 60;          // a engrenagem só aparece com o foco parado
+    if (foco.bloco > pomo.blocos) foco.bloco = 1;
+    vai_para(passo_antes_cfg);
+}
+
+static void ev_cfg_cancelar(lv_event_t *e) { vai_para(passo_antes_cfg); }
+
+static lv_obj_t *botao_redondo(lv_obj_t *pai, const char *s, lv_event_cb_t cb, void *dado)
+{
+    lv_obj_t *b = lv_button_create(pai);
+    lv_obj_set_size(b, 46, 46);
+    lv_obj_set_style_radius(b, 23, 0);
+    lv_obj_set_style_bg_color(b, C_FUNDO, 0);
+    lv_obj_set_style_bg_color(b, C_LINHA, LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(b, C_LINHA, 0);
+    lv_obj_set_style_border_width(b, 1, 0);
+    lv_obj_set_style_shadow_width(b, 0, 0);
+    lv_obj_t *l = texto(b, s, f_negrito, C_TINTA);
+    lv_obj_center(l);
+    lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, dado);
+    return b;
+}
+
+static lv_obj_t *linha_config(lv_obj_t *pai, const char *nome, const char *sub, bool ultima)
+{
+    lv_obj_t *l = caixa(pai);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_obj_set_style_pad_ver(l, 7, 0);
+    lv_obj_set_flex_flow(l, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(l, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    if (!ultima) {
+        lv_obj_set_style_border_side(l, LV_BORDER_SIDE_BOTTOM, 0);
+        lv_obj_set_style_border_width(l, 1, 0);
+        lv_obj_set_style_border_color(l, C_LINHA, 0);
+    }
+    lv_obj_t *txt = caixa(l);
+    lv_obj_set_flex_grow(txt, 1);
+    lv_obj_set_flex_flow(txt, LV_FLEX_FLOW_COLUMN);
+    texto(txt, nome, f_negrito, C_TINTA);
+    texto(txt, sub, f_corpo_p, C_FRACO);
+    return l;
+}
+
+// ---- 3. foco ----
+static void ev_foco_btn(lv_event_t *e) { foco.rodando = !foco.rodando; atualizar(); }
 
 static void ev_foco_parar(lv_event_t *e)
 {
-    foco.rodando = false; foco.acabou = false; foco.resto = FOCO_TOTAL;
+    foco.rodando = false;
+    foco.resto = pomo.foco * 60;
     atualizar();
 }
 
-static void cria_foco(lv_obj_t *t)
+static void ev_trocar_tarefa(lv_event_t *e) { if (!foco.rodando) vai_para(P_ESCOLHER); }
+
+static void atualiza_foco(void)
 {
-    lv_obj_t *col = caixa(t);
-    lv_obj_set_size(col, 470, 520);
-    lv_obj_set_pos(col, 20, 64);
+    char s[64];
+    int total = pomo.foco * 60;
+    snprintf(s, sizeof s, "%02d:%02d", foco.resto / 60, foco.resto % 60);
+    lv_label_set_text(foco_num, s);
+    lv_arc_set_range(foco_arco, 0, total);
+    lv_arc_set_value(foco_arco, total - foco.resto);
+
+    bool comecado = foco.resto < total;
+    lv_label_set_text(foco_btn_txt, foco.rodando ? "Pausar" : comecado ? "Continuar" : "Começar");
+    if (comecado) lv_obj_remove_flag(foco_parar, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(foco_parar, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(foco_sub, foco.rodando ? "foco" : comecado ? "pausado" : "pronta quando você estiver");
+    lv_label_set_text(foco_tarefa, tarefa_atual);
+
+    char hoje[32];
+    if (!foco.feitos) strcpy(hoje, "nenhum concluído hoje");
+    else snprintf(hoje, sizeof hoje, "%d %s hoje", foco.feitos, foco.feitos == 1 ? "concluído" : "concluídos");
+    snprintf(s, sizeof s, "Bloco %d de %d · %s", foco.bloco, pomo.blocos, hoje);
+    lv_label_set_text(foco_blocos, s);
+
+    if (foco.rodando) balao_fala(p_balao, NULL, NULL);   // quieta: divide a mesa com o seu foco
+    else if (comecado) balao_fala(p_balao, "Pausa é pausa.", "Tô aqui quando voltar.");
+    else if (dificil) balao_fala(p_balao, "Se quiser, dez minutinhos já valem.", NULL);
+    else balao_fala(p_balao, "Começar é a parte difícil.", "Eu começo junto.");
+}
+
+// ---- 4. pausa ----
+static const char *CUIDADO[3] = { "Beber água", "Levantar", "Alongar" };
+static const char *CUIDADO_FALA[3][2] = {
+    { "Um copo inteiro, tá?", "Eu espero." },
+    { "Vai até a janela e volta.", "O corpo agradece." },
+    { "Ombro longe da orelha.", "Devagarinho." },
+};
+
+static void ev_pausa_btn(lv_event_t *e) { pausa.rodando = !pausa.rodando; atualizar(); }
+static void ev_pular(lv_event_t *e) { fim_da_pausa(); }
+
+static void ev_cuidado(lv_event_t *e)
+{
+    pausa.cuidado = (int)(intptr_t)lv_event_get_user_data(e);
+    atualizar();
+}
+
+static void atualiza_pausa(void)
+{
+    static const char *EXTENSO[] = { "zero", "um", "dois", "três", "quatro", "cinco",
+                                     "seis", "sete", "oito", "nove", "dez" };
+    char s[80];
+    int total = (pausa.longa ? pomo.longa : pomo.curta) * 60;
+    snprintf(s, sizeof s, pausa.longa ? "CICLO DE %d BLOCOS CONCLUÍDO" : "BLOCO %d CONCLUÍDO",
+             pausa.longa ? pomo.blocos : foco.bloco);
+    lv_label_set_text(pau_selo, s);
+    snprintf(s, sizeof s, "%02d:%02d", pausa.resto / 60, pausa.resto % 60);
+    lv_label_set_text(pau_num, s);
+    lv_label_set_text(pau_nome, pausa.longa ? "Pausa longa" : "Pausa curta");
+    lv_label_set_text(pau_btn_txt, pausa.rodando ? "Pausar" : pausa.resto < total ? "Continuar" : "Começar pausa");
+    for (int i = 0; i < 3; i++)
+        lv_obj_set_style_border_color(pau_cuidado[i], i == pausa.cuidado ? C_OLIVA : C_LINHA, 0);
+
+    if (pausa.cuidado >= 0) balao_fala(p_balao, CUIDADO_FALA[pausa.cuidado][0], CUIDADO_FALA[pausa.cuidado][1]);
+    else if (pausa.longa) balao_fala(p_balao, "Ciclo inteiro! Isso é muito.", "Agora descansa de verdade.");
+    else {
+        int m = pomo.curta;
+        if (m <= 10) snprintf(s, sizeof s, "Vai existir longe da cadeira por %s %s.", EXTENSO[m], m == 1 ? "minuto" : "minutos");
+        else snprintf(s, sizeof s, "Vai existir longe da cadeira por %d minutos.", m);
+        balao_fala(p_balao, "Bloco concluído.", s);
+    }
+}
+
+// ---- a tela ----
+static lv_obj_t *novo_painel(lv_obj_t *t)
+{
+    lv_obj_t *p = caixa(t);
+    lv_obj_set_size(p, 640, TELA_H);
+    lv_obj_set_pos(p, 0, 0);
+    return p;
+}
+
+static lv_obj_t *titulo(lv_obj_t *pai, const char *s, const char *sub)
+{
+    lv_obj_t *l = texto(pai, s, f_negrito_g, C_TINTA);
+    lv_obj_set_pos(l, 44, 70);
+    l = texto(pai, sub, f_corpo_p, C_FRACO);
+    lv_obj_set_width(l, 560);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(l, 44, 118);
+    return l;
+}
+
+static void cria_pomodoro(lv_obj_t *t)
+{
+    // 1. escolher
+    lv_obj_t *p = painel[P_ESCOLHER] = novo_painel(t);
+    titulo(p, "Em que vamos trabalhar?", "Escolhe uma missão ou escreve algo rápido. Uma coisa por vez já serve.");
+    lv_obj_t *col = caixa(p);
+    lv_obj_set_pos(col, 44, 172);
+    lv_obj_set_width(col, 570);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(col, 14, 0);
+    esc_lista = caixa(col);
+    lv_obj_set_width(esc_lista, LV_PCT(100));
+    lv_obj_set_flex_flow(esc_lista, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(esc_lista, 14, 0);
+
+    lv_obj_t *linha = caixa(col);
+    lv_obj_set_width(linha, LV_PCT(100));
+    lv_obj_set_flex_flow(linha, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(linha, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(linha, 12, 0);
+    lv_obj_t *campo = cartao(linha);
+    lv_obj_set_style_bg_color(campo, C_FUNDO, 0);
+    lv_obj_set_height(campo, 52);
+    lv_obj_set_flex_grow(campo, 1);
+    lv_obj_set_style_radius(campo, 12, 0);
+    lv_obj_set_style_pad_hor(campo, 16, 0);
+    lv_obj_add_flag(campo, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(campo, ev_abre_digitar, LV_EVENT_CLICKED, NULL);
+    esc_campo_txt = texto(campo, "", f_corpo, C_FRACO);
+    lv_obj_align(esc_campo_txt, LV_ALIGN_LEFT_MID, 0, 0);
+    botao(linha, "Usar esta", true, ev_usar_esta);
+
+    // 2. configurar
+    p = painel[P_CONFIGURAR] = novo_painel(t);
+    titulo(p, "Configurar Pomodoro", "Ajusta uma vez e eu guardo. Dá para mudar quando o dia pedir outra coisa.");
+    lv_obj_t *c = cartao(p);
+    lv_obj_set_pos(c, 44, 172);
+    lv_obj_set_width(c, 580);
+    lv_obj_set_style_pad_hor(c, 20, 0);
+    lv_obj_set_style_pad_ver(c, 4, 0);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+    for (int i = 0; i < 4; i++) {
+        lv_obj_t *l = linha_config(c, AJUSTE[i].nome, AJUSTE[i].sub, false);
+        botao_redondo(l, "-", ev_ajusta, (void *)(intptr_t)(i * 2));
+        cfg_valor[i] = texto(l, "", f_negrito, C_TINTA);
+        lv_obj_set_width(cfg_valor[i], 96);
+        lv_obj_set_style_text_align(cfg_valor[i], LV_TEXT_ALIGN_CENTER, 0);
+        botao_redondo(l, "+", ev_ajusta, (void *)(intptr_t)(i * 2 + 1));
+    }
+    lv_obj_t *l = linha_config(c, "Avançar automaticamente", "Começa a próxima etapa sozinha", true);
+    cfg_sozinha = lv_switch_create(l);
+    lv_obj_set_size(cfg_sozinha, 62, 34);
+    lv_obj_set_style_bg_color(cfg_sozinha, C_LINHA, 0);
+    lv_obj_set_style_bg_color(cfg_sozinha, C_OLIVA, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_t *bts = caixa(p);
+    lv_obj_set_pos(bts, 44, 492);
+    lv_obj_set_flex_flow(bts, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(bts, 12, 0);
+    botao(bts, "Salvar", true, ev_cfg_salvar);
+    botao(bts, "Cancelar", false, ev_cfg_cancelar);
+
+    // 3. foco
+    p = painel[P_FOCO] = novo_painel(t);
+    col = caixa(p);
+    lv_obj_set_size(col, 420, 520);
+    lv_obj_set_pos(col, 20, 58);
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(col, 18, 0);
+    lv_obj_set_style_pad_row(col, 14, 0);
 
     foco_arco = lv_arc_create(col);
-    lv_obj_set_size(foco_arco, 300, 300);
+    lv_obj_set_size(foco_arco, 290, 290);
     lv_arc_set_rotation(foco_arco, 270);
     lv_arc_set_bg_angles(foco_arco, 0, 360);
-    lv_arc_set_range(foco_arco, 0, FOCO_TOTAL);
     lv_obj_remove_style(foco_arco, NULL, LV_PART_KNOB);
     lv_obj_remove_flag(foco_arco, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_arc_width(foco_arco, 16, LV_PART_MAIN);
@@ -459,72 +1047,129 @@ static void cria_foco(lv_obj_t *t)
     foco_num = texto(foco_arco, "25:00", f_px_foco, C_TINTA);
     lv_obj_center(foco_num);
     foco_sub = texto(foco_arco, "", f_corpo_p, C_FRACO);
-    lv_obj_align(foco_sub, LV_ALIGN_BOTTOM_MID, 0, -70);
+    lv_obj_align(foco_sub, LV_ALIGN_BOTTOM_MID, 0, -66);
 
+    // Tocar na tarefa volta pra escolher outra (com o relógio parado).
     lv_obj_t *trab = caixa(col);
     lv_obj_set_flex_flow(trab, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(trab, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(trab, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(trab, 10);
+    lv_obj_add_event_cb(trab, ev_trocar_tarefa, LV_EVENT_CLICKED, NULL);
     texto(trab, "trabalhando em", f_corpo_p, C_FRACO);
     foco_tarefa = texto(trab, "", f_negrito, C_TINTA);
+    lv_obj_set_style_max_width(foco_tarefa, 410, 0);
+    lv_label_set_long_mode(foco_tarefa, LV_LABEL_LONG_DOT);
 
-    lv_obj_t *bts = caixa(col);
+    bts = caixa(col);
     lv_obj_set_flex_flow(bts, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(bts, 12, 0);
-    foco_btn = botao(bts, "Começar", true, ev_foco_btn);
-    foco_btn_txt = lv_obj_get_child(foco_btn, 0);
+    foco_btn_txt = lv_obj_get_child(botao(bts, "Começar", true, ev_foco_btn), 0);
     foco_parar = botao(bts, "Parar", false, ev_foco_parar);
 
     foco_blocos = texto(col, "", f_corpo_p, C_FRACO);
 
-    lv_obj_t *mesa = caixa(t);
-    lv_obj_set_size(mesa, 460, 8);
-    lv_obj_set_pos(mesa, 520, 500);
-    lv_obj_set_style_bg_color(mesa, lv_color_hex(0x3a3348), 0);
-    lv_obj_set_style_bg_opa(mesa, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(mesa, 4, 0);
+    // 4. pausa
+    p = painel[P_PAUSA] = novo_painel(t);
+    col = caixa(p);
+    lv_obj_set_size(col, 600, 500);
+    lv_obj_set_pos(col, 20, 70);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(col, 10, 0);
+    lv_obj_t *selo = caixa(col);
+    lv_obj_set_style_bg_color(selo, C_CARTAO, 0);
+    lv_obj_set_style_bg_opa(selo, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(selo, C_LINHA, 0);
+    lv_obj_set_style_border_width(selo, 1, 0);
+    lv_obj_set_style_radius(selo, 99, 0);
+    lv_obj_set_style_pad_hor(selo, 16, 0);
+    lv_obj_set_style_pad_ver(selo, 5, 0);
+    pau_selo = texto(selo, "", f_corpo_p, C_OLIVA);
+    pau_num = texto(col, "05:00", f_px_foco, C_TINTA);
+    pau_nome = texto(col, "", f_corpo_g, C_TINTA);
+    texto(col, "O trabalho fica aqui. Agora escolhe um cuidado pequeno.", f_corpo_p, C_FRACO);
+    lv_obj_t *cuid = caixa(col);
+    lv_obj_set_flex_flow(cuid, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(cuid, 12, 0);
+    lv_obj_set_style_margin_top(cuid, 16, 0);
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *b = pau_cuidado[i] = botao(cuid, CUIDADO[i], false, ev_cuidado);
+        lv_obj_remove_event_cb(b, ev_cuidado);                  // botao() não passa dado
+        lv_obj_add_event_cb(b, ev_cuidado, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_set_style_border_width(b, 2, 0);
+        lv_obj_set_style_border_color(b, C_LINHA, 0);
+    }
+    bts = caixa(col);
+    lv_obj_set_flex_flow(bts, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(bts, 12, 0);
+    lv_obj_set_style_margin_top(bts, 16, 0);
+    pau_btn_txt = lv_obj_get_child(botao(bts, "Começar pausa", true, ev_pausa_btn), 0);
+    botao(bts, "Pular", false, ev_pular);
 
-    foco_balao = balao(t, 560, 64, 300);
+    // o lado da Lylu
+    p_mesa = caixa(t);
+    lv_obj_set_size(p_mesa, 420, 8);
+    lv_obj_set_pos(p_mesa, 580, 548);
+    lv_obj_set_style_bg_color(p_mesa, C_LINHA, 0);
+    lv_obj_set_style_bg_opa(p_mesa, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(p_mesa, 4, 0);
+
+    p_balao = balao(t, 650, 64, 268);
+
+    p_engrenagem = lv_button_create(t);
+    lv_obj_set_size(p_engrenagem, 44, 44);
+    lv_obj_set_pos(p_engrenagem, 968, 64);
+    lv_obj_set_style_radius(p_engrenagem, 22, 0);
+    lv_obj_set_style_bg_color(p_engrenagem, C_CARTAO, 0);
+    lv_obj_set_style_border_color(p_engrenagem, C_LINHA, 0);
+    lv_obj_set_style_border_width(p_engrenagem, 1, 0);
+    lv_obj_set_style_shadow_width(p_engrenagem, 0, 0);
+    lv_obj_set_ext_click_area(p_engrenagem, 8);
+    lv_obj_t *g = texto(p_engrenagem, LV_SYMBOL_SETTINGS, &lv_font_montserrat_14, C_TINTA);
+    lv_obj_center(g);
+    lv_obj_add_event_cb(p_engrenagem, ev_engrenagem, LV_EVENT_CLICKED, NULL);
 }
 
-static void atualiza_foco(void)
+static void atualiza_pomodoro(void)
 {
-    char s[64];
-    snprintf(s, sizeof s, "%02d:%02d", foco.resto / 60, foco.resto % 60);
-    lv_label_set_text(foco_num, s);
-    lv_arc_set_value(foco_arco, FOCO_TOTAL - foco.resto);
+    for (int i = 0; i < 4; i++)
+        if (i == (int)passo) lv_obj_remove_flag(painel[i], LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(painel[i], LV_OBJ_FLAG_HIDDEN);
+    bool engrenagem = passo == P_ESCOLHER || (passo == P_FOCO && !foco.rodando);
+    if (engrenagem) lv_obj_remove_flag(p_engrenagem, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(p_engrenagem, LV_OBJ_FLAG_HIDDEN);
+    if (passo == P_FOCO) lv_obj_remove_flag(p_mesa, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(p_mesa, LV_OBJ_FLAG_HIDDEN);
 
-    bool comecado = foco.resto < FOCO_TOTAL && !foco.acabou;
-    lv_label_set_text(foco_btn_txt, foco.rodando ? "Pausar" : comecado ? "Continuar" : "Começar");
-    if (foco.rodando || comecado) lv_obj_remove_flag(foco_parar, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(foco_parar, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(foco_sub, foco.acabou ? "bloco concluído" : foco.rodando ? "foco" : comecado ? "pausado" : "pronta quando você estiver");
+    switch (passo) {
+    case P_ESCOLHER:
+        atualiza_escolher();
+        balao_fala(p_balao, "Não precisa escolher a tarefa perfeita.", "Escolhe uma possível.");
+        break;
+    case P_CONFIGURAR:
+        atualiza_config();
+        balao_fala(p_balao, "Vinte e cinco é padrão, não mandamento.", "O cérebro não assina contrato.");
+        break;
+    case P_FOCO:  atualiza_foco(); break;
+    case P_PAUSA: atualiza_pausa(); break;
+    }
+}
 
-    const char *pend = "O que você quiser";
-    for (int i = 0; i < n_missao(); i++) if (!missao[i].f) { pend = missao[i].t; break; }
-    lv_label_set_text(foco_tarefa, pend);
-
-    if (foco.blocos) snprintf(s, sizeof s, "%d %s de foco hoje.", foco.blocos, foco.blocos == 1 ? "bloco" : "blocos");
-    else snprintf(s, sizeof s, "Nenhum bloco de foco ainda hoje. Sem pressa.");
-    lv_label_set_text(foco_blocos, s);
-
-    if (foco.acabou) balao_texto(foco_balao, "25 minutos! Levanta, estica, bebe uma água.");
-    else if (foco.rodando) balao_texto(foco_balao, NULL);   // quieta: divide a mesa com o seu foco
-    else if (comecado) balao_texto(foco_balao, "Pausa é pausa. Tô aqui quando voltar.");
-    else balao_texto(foco_balao, dificil ? "Se quiser, dez minutinhos já valem." : "Começar é a parte difícil. Eu começo junto.");
+// A cada segundo só os números mudam; refazer os cartões a cada tique piscaria.
+static void tique_pomodoro(void)
+{
+    if (passo == P_FOCO) atualiza_foco();
+    else if (passo == P_PAUSA) atualiza_pausa();
 }
 
 static anim_t anim_foco(void)
 {
-    if (foco.acabou) return A_COMEMORANDO;
-    if (foco.rodando) return A_CONCENTRADA;
-    if (foco.resto < FOCO_TOTAL) return A_CAFE;
-    return A_PENSANDO;
+    if (passo == P_FOCO && foco.rodando) return A_CONCENTRADA;
+    return A_FALA;          // a Lylu nova, conversando
 }
 
 // ---------------------------------------------------------------- TAREFAS
-// A lista é recriada inteira, inclusive o item tocado: redesenha só depois que o toque termina.
-static void atualizar_depois(void *p) { atualizar(); }
-
 static void ev_tarefa(lv_event_t *e)
 {
     tarefa_t *t = lv_event_get_user_data(e);
@@ -813,6 +1458,7 @@ static void cria_semana(lv_obj_t *t)
 
 static lv_obj_t *wf_tela, *wf_status, *wf_lista, *wf_recado, *wf_procurar, *wf_esquecer;
 static lv_obj_t *wf_balao, *wf_senha_titulo, *wf_campo, *wf_olho, *wf_teclado, *wf_balao_senha;
+static teclado_t wf_tc;
 static lv_obj_t *aj_wifi_sub;
 static bool wf_aberta, wf_modo_senha;
 static char wf_alvo[REDE_NOME_MAX];
@@ -820,47 +1466,6 @@ static rede_achada_t wf_achadas[REDE_MAX_ACHADAS];
 static int wf_n;
 
 static void atualiza_wifi(void);
-
-// ---- o teclado ----
-// O teclado pronto da LVGL marca as teclas de comando com símbolos da fonte
-// Montserrat, que as fontes TTF da Lylu não têm — sairia um quadradinho vazio.
-// Então o mapa é nosso, escrito em português, num lv_buttonmatrix puro.
-#define T_SO_UM LV_BUTTONMATRIX_CTRL_NO_REPEAT
-#define T_VERDE LV_BUTTONMATRIX_CTRL_CHECKED
-
-static const char *TECLAS_MIN[] = {
-    "1","2","3","4","5","6","7","8","9","0","\n",
-    "q","w","e","r","t","y","u","i","o","p","\n",
-    "a","s","d","f","g","h","j","k","l","Apagar","\n",
-    "ABC","z","x","c","v","b","n","m",".","-","\n",
-    "#+="," ","Cancelar","Conectar","" };
-
-static const char *TECLAS_MAI[] = {
-    "1","2","3","4","5","6","7","8","9","0","\n",
-    "Q","W","E","R","T","Y","U","I","O","P","\n",
-    "A","S","D","F","G","H","J","K","L","Apagar","\n",
-    "abc","Z","X","C","V","B","N","M","_","+","\n",
-    "#+="," ","Cancelar","Conectar","" };
-
-static const char *TECLAS_SIMB[] = {
-    "1","2","3","4","5","6","7","8","9","0","\n",
-    "!","@","#","$","%","&","*","(",")","_","\n",
-    "-","+","=","/","\\",":",";","?","^","Apagar","\n",
-    "\"","'","[","]","{","}","<",">","|","~","\n",
-    "abc"," ","Cancelar","Conectar","" };
-
-static const lv_buttonmatrix_ctrl_t TECLAS_LARGURA[] = {
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 2,            // "Apagar" ocupa duas
-    1 | T_SO_UM, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // a tecla de trocar o mapa
-    2 | T_SO_UM, 4, 2 | T_SO_UM, 3 | T_SO_UM | T_VERDE };
-
-static void teclas_mapa(const char **mapa)
-{
-    lv_buttonmatrix_set_map(wf_teclado, mapa);
-    lv_buttonmatrix_set_ctrl_map(wf_teclado, TECLAS_LARGURA);   // o set_map zera as larguras
-}
 
 // ---- desenhinhos que a fonte não tem ----
 static void cadeado(lv_obj_t *pai)
@@ -904,7 +1509,7 @@ static void abre_senha(void)
     lv_textarea_set_password_mode(wf_campo, true);
     lv_label_set_text(lv_obj_get_child(wf_olho, 0), "mostrar");
     lv_obj_add_state(wf_campo, LV_STATE_FOCUSED);
-    teclas_mapa(TECLAS_MIN);
+    teclado_mapa(&wf_tc, 0);
 }
 
 static void ev_wifi_abre(lv_event_t *e)
@@ -947,26 +1552,17 @@ static void ev_wifi_olho(lv_event_t *e)
     lv_label_set_text(lv_obj_get_child(wf_olho, 0), escondida ? "esconder" : "mostrar");
 }
 
-static void ev_tecla(lv_event_t *e)
+static void wifi_conecta(void)
 {
-    uint32_t i = lv_buttonmatrix_get_selected_button(wf_teclado);
-    const char *t = lv_buttonmatrix_get_button_text(wf_teclado, i);
-    if (!t) return;
-    if      (!strcmp(t, "ABC"))      teclas_mapa(TECLAS_MAI);
-    else if (!strcmp(t, "abc"))      teclas_mapa(TECLAS_MIN);
-    else if (!strcmp(t, "#+="))      teclas_mapa(TECLAS_SIMB);
-    else if (!strcmp(t, "Apagar"))   lv_textarea_delete_char(wf_campo);
-    else if (!strcmp(t, "Cancelar")) ev_wifi_fecha(NULL);
-    else if (!strcmp(t, "Conectar")) {
-        rede_conectar(wf_alvo, lv_textarea_get_text(wf_campo));
-        // O teclado sai da frente na hora. Entrar na rede leva alguns segundos, e
-        // um balãozinho atrás do teclado é aviso fraco demais: some o teclado, e a
-        // resposta passa a ser a linha de cima, grande, junto com a cara dela.
-        wf_modo_senha = false;
-        atualizar();
-    }
-    else lv_textarea_add_text(wf_campo, t);
+    rede_conectar(wf_alvo, lv_textarea_get_text(wf_campo));
+    // O teclado sai da frente na hora. Entrar na rede leva alguns segundos, e
+    // um balãozinho atrás do teclado é aviso fraco demais: some o teclado, e a
+    // resposta passa a ser a linha de cima, grande, junto com a cara dela.
+    wf_modo_senha = false;
+    atualizar();
 }
+
+static void wifi_cancela(void) { ev_wifi_fecha(NULL); }
 
 // ---- montagem ----
 static void linha_rede(const rede_achada_t *r, int i, bool conectada)
@@ -1155,26 +1751,11 @@ static void cria_wifi(void)
 
     wf_balao_senha = balao(wf_tela, 34, 204, 500);
 
-    wf_teclado = lv_buttonmatrix_create(wf_tela);
-    lv_obj_set_size(wf_teclado, TELA_W, 268);
-    lv_obj_set_pos(wf_teclado, 0, 288);
-    lv_buttonmatrix_set_one_checked(wf_teclado, false);
-    lv_obj_set_style_bg_opa(wf_teclado, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(wf_teclado, 0, 0);
-    lv_obj_set_style_pad_all(wf_teclado, 8, 0);
-    lv_obj_set_style_pad_row(wf_teclado, 8, 0);
-    lv_obj_set_style_pad_column(wf_teclado, 8, 0);
-    lv_obj_set_style_bg_color(wf_teclado, C_CARTAO, LV_PART_ITEMS);
-    lv_obj_set_style_bg_opa(wf_teclado, LV_OPA_COVER, LV_PART_ITEMS);
-    lv_obj_set_style_radius(wf_teclado, 10, LV_PART_ITEMS);
-    lv_obj_set_style_shadow_width(wf_teclado, 0, LV_PART_ITEMS);
-    lv_obj_set_style_text_color(wf_teclado, C_TINTA, LV_PART_ITEMS);
-    lv_obj_set_style_text_font(wf_teclado, f_corpo, LV_PART_ITEMS);
-    lv_obj_set_style_bg_color(wf_teclado, C_LINHA, LV_PART_ITEMS | LV_STATE_PRESSED);
-    lv_obj_set_style_bg_color(wf_teclado, C_OLIVA, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_set_style_text_color(wf_teclado, C_ESCURO, LV_PART_ITEMS | LV_STATE_CHECKED);
-    lv_obj_add_event_cb(wf_teclado, ev_tecla, LV_EVENT_VALUE_CHANGED, NULL);
-    teclas_mapa(TECLAS_MIN);
+    wf_tc.campo = wf_campo;
+    wf_tc.ok = wifi_conecta;
+    wf_tc.cancela = wifi_cancela;
+    teclado_cria(&wf_tc, wf_tela, 288, "Conectar");
+    wf_teclado = wf_tc.bm;
 }
 
 // A rede avisa da thread de eventos do ESP-IDF, não da thread da tela.
@@ -1366,6 +1947,14 @@ static void cria_ajustes(lv_obj_t *t)
 static const char *humor(lv_color_t *cor)
 {
     if (dificil) { *cor = C_CEU; return "cuidadora"; }
+    if (tela_atual == T_FOCO) {
+        switch (passo) {
+        case P_CONFIGURAR: *cor = C_CEU;   return "curiosa";
+        case P_FOCO:       *cor = C_OLIVA; return "concentrada";
+        case P_PAUSA:      *cor = C_CEU;   return "cuidadora";
+        default: break;
+        }
+    }
     if (missao_completa()) { *cor = C_AMBAR; return "comemorando"; }
     if (tela_atual == T_CASA || tela_atual == T_RELOGIO) { *cor = C_LILAS; return "brincalhona"; }
     *cor = C_OLIVA; return "animada";
@@ -1391,7 +1980,7 @@ static void atualizar(void)
     }
 
     atualiza_tarefas();
-    atualiza_foco();
+    atualiza_pomodoro();
     atualiza_linha_wifi();
     atualiza_linha_mic();
 
@@ -1399,7 +1988,7 @@ static void atualizar(void)
     if (mf_aberta) { atualiza_microfone(); return; }
 
     switch (tela_atual) {
-    case T_FOCO:    lylu_na_tela(T_FOCO, 560, 140); lylu_mostra(anim_foco()); break;
+    case T_FOCO:    lylu_na_tela(T_FOCO, 640, 196); lylu_mostra(anim_foco()); break;
     case T_TAREFAS: lylu_na_tela(T_TAREFAS, 20, 200);
                     lylu_mostra(missao_completa() ? A_COMEMORANDO : dificil ? A_CUIDADORA : A_APONTANDO); break;
     case T_CASA:    lylu_na_tela(T_CASA, (int)casa.x, CASA_Y); lylu_mostra(casa.fazendo); break;
@@ -1440,12 +2029,9 @@ static void tique(lv_timer_t *t)
     vigia_lylu();
     static int seg;
     if (++seg % 300 == 0) loga_memoria("a cada 5 min");
-    if (foco.rodando && --foco.resto <= 0) {
-        foco.rodando = false; foco.acabou = true; foco.resto = 0; foco.blocos++;
-        atualizar();
-    } else if (tela_atual == T_FOCO) {
-        atualiza_foco();
-    }
+    if (foco.rodando && --foco.resto <= 0) fim_do_foco();
+    else if (pausa.rodando && --pausa.resto <= 0) fim_da_pausa();
+    else if (tela_atual == T_FOCO) tique_pomodoro();
     if (tela_atual == T_RELOGIO && carinho_ate < agora_ms())
         lylu_mostra((agora_ms() / 12000) % 2 ? A_NINTENDO : A_BRINCANDO);
 }
@@ -1503,7 +2089,7 @@ void app_main(void)
 
     cria_status();
     cria_pontos();
-    cria_foco(tiles[T_FOCO]);
+    cria_pomodoro(tiles[T_FOCO]);
     cria_tarefas(tiles[T_TAREFAS]);
     cria_casa(tiles[T_CASA]);
     cria_relogio(tiles[T_RELOGIO]);
@@ -1511,6 +2097,7 @@ void app_main(void)
     cria_ajustes(tiles[T_AJUSTES]);
     cria_wifi();
     cria_microfone();
+    cria_digitar();
 
     lylu = lv_gif_create(tiles[T_FOCO]);
     lylu_outra = lv_gif_create(tiles[T_FOCO]);
@@ -1531,6 +2118,10 @@ void app_main(void)
 
     audio_iniciar();         // ES8311: se não responder, ela segue surda e nada quebra
     rede_iniciar(ev_rede);   // demora uns segundos e pode não achar o C6; a tela já está de pé
+    // Os tempos do pomodoro moram na NVS, e quem abre a NVS é a rede. Abrir
+    // antes dela, no começo do app_main, derrubava o DHCP: associava na rede e o
+    // IP nunca chegava (três boots seguidos; só mudar isto de lugar resolveu).
+    if (placa_trava()) { pomo_carrega(); atualizar(); placa_destrava(); }
 
     ESP_LOGI(TAG, "Lylu pronta");
 }
