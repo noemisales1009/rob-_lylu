@@ -41,18 +41,20 @@ static const char *TAG = "lylu";
 // ---------------------------------------------------------------- arquivos embutidos
 #define EMB(nome) extern const uint8_t nome##_start[] asm("_binary_" #nome "_start"); \
                   extern const uint8_t nome##_end[]   asm("_binary_" #nome "_end");
-EMB(concentrada_frente_gif) EMB(comemorando_v2_gif) EMB(pensando_gif) EMB(tomando_cafe_frente_gif)
-EMB(apontando_lista_gif) EMB(cuidadora_v2_gif) EMB(rindo_carinho_frente_gif)
-EMB(andando_direita_v2_gif) EMB(andando_esquerda_v2_gif) EMB(lendo_frente_gif)
-EMB(soprando_bolhas_frente_gif) EMB(brincando_frente_gif) EMB(bocejando_frente_gif)
-EMB(dormindo_frente_gif) EMB(tomando_agua_frente_gif) EMB(jogando_nintendo_frente_gif)
-EMB(lylu_fala_gif)
+// Uma Lylu para cada tela (36 quadros, 300x450, desenhados pela Noemi em 28/09/2026).
+EMB(lylu_pomodoro_gif) EMB(lylu_tarefas_gif) EMB(lylu_recados_gif) EMB(lylu_semana_gif)
+EMB(lylu_relogio_gif) EMB(lylu_quarto_gif) EMB(lylu_ajustes_gif)
 EMB(corpo_ttf) EMB(corpo_negrito_ttf) EMB(pixel_ttf)
 
 typedef enum {
-    A_CONCENTRADA, A_COMEMORANDO, A_PENSANDO, A_CAFE, A_APONTANDO, A_CUIDADORA, A_RINDO,
-    A_ANDA_DIR, A_ANDA_ESQ, A_LENDO, A_BOLHAS, A_BRINCANDO, A_BOCEJANDO, A_DORMINDO,
-    A_AGUA, A_NINTENDO, A_FALA, A_TOTAL
+    A_POMODORO,   // sentada com o notebook
+    A_TAREFAS,    // em pé, explicando com as mãos
+    A_RECADOS,    // meio corpo, conversando
+    A_SEMANA,     // sentada com o notebook, pensando e acenando
+    A_RELOGIO,    // em pé, mãos no bolso
+    A_QUARTO,     // alongando os braços
+    A_AJUSTES,    // de lado, tocando na tela
+    A_TOTAL
 } anim_t;
 
 static lv_image_dsc_t GIF[A_TOTAL];
@@ -65,15 +67,10 @@ static void registra_gif(anim_t a, const uint8_t *ini, const uint8_t *fim)
 
 static void carrega_gifs(void)
 {
-    REG(A_CONCENTRADA, concentrada_frente_gif); REG(A_COMEMORANDO, comemorando_v2_gif);
-    REG(A_PENSANDO, pensando_gif); REG(A_CAFE, tomando_cafe_frente_gif);
-    REG(A_APONTANDO, apontando_lista_gif); REG(A_CUIDADORA, cuidadora_v2_gif);
-    REG(A_RINDO, rindo_carinho_frente_gif); REG(A_ANDA_DIR, andando_direita_v2_gif);
-    REG(A_ANDA_ESQ, andando_esquerda_v2_gif); REG(A_LENDO, lendo_frente_gif);
-    REG(A_BOLHAS, soprando_bolhas_frente_gif); REG(A_BRINCANDO, brincando_frente_gif);
-    REG(A_BOCEJANDO, bocejando_frente_gif); REG(A_DORMINDO, dormindo_frente_gif);
-    REG(A_AGUA, tomando_agua_frente_gif); REG(A_NINTENDO, jogando_nintendo_frente_gif);
-    REG(A_FALA, lylu_fala_gif);
+    REG(A_POMODORO, lylu_pomodoro_gif); REG(A_TAREFAS, lylu_tarefas_gif);
+    REG(A_RECADOS, lylu_recados_gif);   REG(A_SEMANA, lylu_semana_gif);
+    REG(A_RELOGIO, lylu_relogio_gif);   REG(A_QUARTO, lylu_quarto_gif);
+    REG(A_AJUSTES, lylu_ajustes_gif);
 }
 
 // ---------------------------------------------------------------- fontes
@@ -375,7 +372,7 @@ static void loga_memoria(const char *quando)
 
 static void lylu_mostra(anim_t a)
 {
-    if (carinho_ate > agora_ms()) a = A_RINDO;
+    if (carinho_ate > agora_ms()) a = A_RECADOS;   // carinho: ela vira pra conversar
     if (a == lylu_anim) return;
     anim_t antes = lylu_anim;
     bool primeira = antes == A_TOTAL;
@@ -488,28 +485,49 @@ static void cria_status(void)
     texto(st_humor, "animada", f_corpo_p, C_TINTA);
 }
 
+// ---------------------------------------------------------------- a barra de navegação
+// Botões embaixo em vez de arrastar: a troca é na hora, sem animação. Arrastar
+// fazia a placa redesenhar a tela inteira a cada passo do dedo (e às vezes
+// trocava de tela sem querer).
+#define NAV_ALTURA 52
+static const char *NOME_TELA[N_TELAS] = { "Foco", "Tarefas", "Recados", "Semana", "Relógio", "Cantinho", "Ajustes" };
+
+static void ev_troca_tela(lv_event_t *e);
+
 static void ev_ponto(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
-    lv_tileview_set_tile_by_index(tv, i, 0, LV_ANIM_ON);
+    if (i == tela_atual) return;
+    lv_tileview_set_tile_by_index(tv, i, 0, LV_ANIM_OFF);
+    ev_troca_tela(NULL);
 }
 
 static void cria_pontos(void)
 {
     lv_obj_t *p = caixa_pontos = caixa(lv_layer_top());
-    lv_obj_align(p, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_size(p, TELA_W, NAV_ALTURA);
+    lv_obj_align(p, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(p, C_FUNDO, 0);
+    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_side(p, LV_BORDER_SIDE_TOP, 0);
+    lv_obj_set_style_border_width(p, 1, 0);
+    lv_obj_set_style_border_color(p, C_LINHA, 0);
     lv_obj_set_flex_flow(p, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(p, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(p, 10, 0);
-    lv_obj_set_style_pad_all(p, 6, 0);
     for (int i = 0; i < N_TELAS; i++) {
-        pontos[i] = caixa(p);
-        lv_obj_set_size(pontos[i], 10, 10);
-        lv_obj_set_style_radius(pontos[i], 5, 0);
-        lv_obj_set_style_bg_opa(pontos[i], LV_OPA_COVER, 0);
-        lv_obj_add_flag(pontos[i], LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_ext_click_area(pontos[i], 10);
-        lv_obj_add_event_cb(pontos[i], ev_ponto, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *b = pontos[i] = caixa(p);
+        lv_obj_set_size(b, TELA_W / N_TELAS, NAV_ALTURA);
+        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(b, C_CARTAO, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(b, ev_ponto, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        lv_obj_t *risco = caixa(b);                  // o risquinho da tela atual
+        lv_obj_set_size(risco, 34, 3);
+        lv_obj_set_style_radius(risco, 2, 0);
+        lv_obj_set_style_bg_color(risco, C_OLIVA, 0);
+        lv_obj_set_style_bg_opa(risco, LV_OPA_COVER, 0);
+        lv_obj_align(risco, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_t *l = texto(b, NOME_TELA[i], f_corpo_p, C_FRACO);
+        lv_obj_center(l);
     }
 }
 
@@ -1150,8 +1168,8 @@ static void cria_pomodoro(lv_obj_t *t)
 
     // o lado da Lylu
     p_mesa = caixa(t);
-    lv_obj_set_size(p_mesa, 420, 8);
-    lv_obj_set_pos(p_mesa, 580, 548);
+    lv_obj_set_size(p_mesa, 400, 8);
+    lv_obj_set_pos(p_mesa, 620, 532);
     lv_obj_set_style_bg_color(p_mesa, C_LINHA, 0);
     lv_obj_set_style_bg_opa(p_mesa, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(p_mesa, 4, 0);
@@ -1206,8 +1224,7 @@ static void tique_pomodoro(void)
 
 static anim_t anim_foco(void)
 {
-    if (passo == P_FOCO && foco.rodando) return A_CONCENTRADA;
-    return A_FALA;          // a Lylu nova, conversando
+    return A_POMODORO;      // sentada com o notebook, trabalhando junto
 }
 
 // ---------------------------------------------------------------- TAREFAS
@@ -1508,12 +1525,7 @@ static void atualiza_recados(void)
 
 // ---------------------------------------------------------------- CASA (o cantinho da Lylu)
 // Uma pausa sem culpa: três respiros curtos à esquerda, e o quarto dela à direita,
-// onde ela anda e faz as coisinhas dela quando ninguém pede nada.
-static struct { float x, alvo; anim_t fazendo; int64_t ate; } casa = { 540, 540, A_LENDO, 0 };
-static const anim_t ATIVIDADES[] = { A_LENDO, A_CAFE, A_BOLHAS, A_BRINCANDO, A_BOCEJANDO, A_DORMINDO, A_AGUA, A_NINTENDO };
-#define CASA_Y 250
-#define CASA_X_MIN 440      // antes disso ela passava por cima do texto
-#define CASA_X_MAX 660      // 1024 - 360 da largura dela
+// com ela no meio, alongando.
 static lv_obj_t *casa_balao;
 static int casa_respiro = -1;
 
@@ -1523,7 +1535,6 @@ static const char *RESPIRO_FALA[3][2] = {
     { "Um copo inteiro, tá?", "Eu bebo junto." },
     { "Estica os braços pro alto.", "Ombro longe da orelha." },
 };
-static const anim_t RESPIRO_ANIM[3] = { A_BOLHAS, A_AGUA, A_BOCEJANDO };
 
 static lv_obj_t *retangulo(lv_obj_t *pai, int x, int y, int w, int h, uint32_t cor)
 {
@@ -1539,9 +1550,6 @@ static void ev_respiro(lv_event_t *e)
 {
     int i = (int)(intptr_t)lv_event_get_user_data(e);
     casa_respiro = i;
-    casa.alvo = casa.x;                  // para de andar e faz junto
-    casa.fazendo = RESPIRO_ANIM[i];
-    casa.ate = agora_ms() + 20000;
     atualizar();
 }
 
@@ -1556,14 +1564,14 @@ static void cria_casa(lv_obj_t *t)
     retangulo(jan, 106, 8, 8, 144, 0x2b4a3e);
     retangulo(jan, 8, 76, 204, 8, 0x2b4a3e);
 
-    lv_obj_t *tapete = retangulo(t, 470, 540, 360, 40, 0x1a3329);
+    lv_obj_t *tapete = retangulo(t, 560, 500, 380, 36, 0x1a3329);
     lv_obj_set_style_radius(tapete, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_color(tapete, lv_color_hex(0x2b4a3e), 0);
     lv_obj_set_style_border_width(tapete, 6, 0);
 
-    lv_obj_t *vaso = retangulo(t, 930, 470, 52, 62, 0x5a4030);
+    lv_obj_t *vaso = retangulo(t, 950, 470, 52, 62, 0x5a4030);
     lv_obj_set_style_radius(vaso, 10, 0);
-    const int folhas[3][3] = { { 912, 404, 0x4f6d33 }, { 948, 392, 0x5f7f3c }, { 928, 370, 0x6f8c44 } };
+    const int folhas[3][3] = { { 932, 404, 0x4f6d33 }, { 968, 392, 0x5f7f3c }, { 948, 370, 0x6f8c44 } };
     for (int i = 0; i < 3; i++) {
         lv_obj_t *f = retangulo(t, folhas[i][0], folhas[i][1], 50, 50, folhas[i][2]);
         lv_obj_set_style_radius(f, LV_RADIUS_CIRCLE, 0);
@@ -1598,36 +1606,13 @@ static void cria_casa(lv_obj_t *t)
     lv_obj_t *r = texto(t, "Sem cronômetro. Volta quando quiser.", f_corpo_p, C_FRACO);
     lv_obj_set_pos(r, 44, 336);
 
-    casa_balao = balao(t, 470, 72, 250);
+    casa_balao = balao(t, 440, 72, 230);
 }
 
 static void atualiza_casa(void)
 {
     if (casa_respiro >= 0) balao_fala(casa_balao, RESPIRO_FALA[casa_respiro][0], RESPIRO_FALA[casa_respiro][1]);
     else balao_fala(casa_balao, "Faz um tempinho que você tá aí.", "Quer respirar comigo?");
-}
-
-static void passo_casa(lv_timer_t *tm)
-{
-    if (tela_atual != T_CASA || carinho_ate > agora_ms()) return;
-    float d = casa.alvo - casa.x;
-    if (d > 2 || d < -2) {
-        float v = 3.0f;
-        casa.x += (d > 0 ? 1 : -1) * (v < (d > 0 ? d : -d) ? v : (d > 0 ? d : -d));
-        lv_obj_set_x(lylu, (int)casa.x);
-        lv_obj_set_x(lylu_outra, (int)casa.x);
-        lylu_mostra(casa.alvo > casa.x ? A_ANDA_DIR : A_ANDA_ESQ);
-    } else if (agora_ms() > casa.ate) {
-        if (casa_respiro >= 0) { casa_respiro = -1; atualiza_casa(); }   // o respiro acabou
-        if (casa.ate && esp_random() % 10 < 6) {
-            casa.alvo = CASA_X_MIN + esp_random() % (CASA_X_MAX - CASA_X_MIN);
-            casa.fazendo = ATIVIDADES[esp_random() % (sizeof ATIVIDADES / sizeof ATIVIDADES[0])];
-        }
-        casa.ate = agora_ms() + 5000 + esp_random() % 4000;
-        lylu_mostra(casa.fazendo);
-    } else {
-        lylu_mostra(casa.fazendo);
-    }
 }
 
 // ---------------------------------------------------------------- RELÓGIO
@@ -1973,12 +1958,7 @@ static const char *wf_fala(rede_estado_t e)
     }
 }
 
-static anim_t wf_anim(rede_estado_t e)
-{
-    if (e == REDE_CONECTADA && !wf_modo_senha) return A_COMEMORANDO;
-    if (e == REDE_SEM_RADIO || e == REDE_SENHA_ERRADA || e == REDE_SUMIU) return A_CUIDADORA;
-    return A_PENSANDO;      // curiosa, esperando a conexão
-}
+static anim_t wf_anim(rede_estado_t e) { (void)e; return A_AJUSTES; }   // de lado, mexendo na tela
 
 static void atualiza_wifi(void)
 {
@@ -2013,7 +1993,7 @@ static void atualiza_wifi(void)
         snprintf(s, sizeof s, "Senha de \"%s\"", wf_alvo);
         lv_label_set_text(wf_senha_titulo, s);
         balao_texto(wf_balao_senha, wf_fala(e));
-        lylu_em(wf_tela, 656, 10);
+        lylu_em(wf_tela, 690, 10);
         // Os 360x360 dela (transparentes, mas tocáveis por causa do carinho) cobrem
         // o botão "mostrar": o toque ia pra ela e a senha nunca aparecia.
         lv_obj_remove_flag(lylu, LV_OBJ_FLAG_CLICKABLE);
@@ -2032,7 +2012,7 @@ static void atualiza_wifi(void)
         if (rede_tem_salva()) lv_obj_remove_flag(wf_esquecer, LV_OBJ_FLAG_HIDDEN);
         else lv_obj_add_flag(wf_esquecer, LV_OBJ_FLAG_HIDDEN);
         balao_texto(wf_balao, wf_fala(e));
-        lylu_em(wf_tela, 648, 176);
+        lylu_em(wf_tela, 690, 100);
     }
     lylu_mostra(wf_anim(e));
 }
@@ -2184,8 +2164,8 @@ static void atualiza_microfone(void)
     balao_texto(mf_balao, !audio_escutando() ? "Não consegui abrir os ouvidos dessa vez."
                         : mf_ouvindo         ? "Tô te ouvindo!"
                                              : "Fala alguma coisa. Eu tô aqui.");
-    lylu_em(mf_tela, 650, 150);
-    lylu_mostra(!audio_escutando() ? A_CUIDADORA : mf_ouvindo ? A_RINDO : A_PENSANDO);
+    lylu_em(mf_tela, 690, 100);
+    lylu_mostra(A_RECADOS);
 }
 
 // A barra precisa de mão mais leve que o resto: atualizar a tela inteira 16x por
@@ -2398,8 +2378,12 @@ static void atualizar(void)
         else lv_obj_remove_state(aj_dificil, LV_STATE_CHECKED);
     }
     for (int i = 0; i < N_TELAS; i++) {
-        lv_obj_set_width(pontos[i], i == tela_atual ? 26 : 10);
-        lv_obj_set_style_bg_color(pontos[i], i == tela_atual ? C_TINTA : C_LINHA, 0);
+        bool ativa = i == tela_atual;
+        lv_obj_t *risco = lv_obj_get_child(pontos[i], 0), *l = lv_obj_get_child(pontos[i], 1);
+        if (ativa) lv_obj_remove_flag(risco, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(risco, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_color(l, ativa ? C_TINTA : C_FRACO, 0);
+        lv_obj_set_style_text_font(l, ativa ? f_negrito_p : f_corpo_p, 0);
     }
 
     atualiza_tarefas();
@@ -2420,13 +2404,14 @@ static void atualizar(void)
     if (mf_aberta) { atualiza_microfone(); return; }
 
     switch (tela_atual) {
-    case T_FOCO:    lylu_na_tela(T_FOCO, 640, 196); lylu_mostra(anim_foco()); break;
-    case T_RECADOS: lylu_na_tela(T_RECADOS, 672, 178); lylu_mostra(A_FALA); break;
-    case T_TAREFAS: lylu_na_tela(T_TAREFAS, 20, 190); lylu_mostra(A_FALA); break;
-    case T_CASA:    lylu_na_tela(T_CASA, (int)casa.x, CASA_Y); lylu_mostra(casa.fazendo); break;
-    case T_RELOGIO: lylu_na_tela(T_RELOGIO, 672, 178); lylu_mostra(A_FALA); break;
-    case T_SEMANA:  lylu_na_tela(T_SEMANA, 672, 178); lylu_mostra(A_FALA); break;
-    case T_AJUSTES: lylu_na_tela(T_AJUSTES, 672, 178); lylu_mostra(A_FALA); break;
+    // Os quadros são 300x450 com uns 53 px de folga embaixo: y + 397 é o pé dela.
+    case T_FOCO:    lylu_na_tela(T_FOCO, 690, 154); lylu_mostra(anim_foco()); break;   // sentada na mesa
+    case T_TAREFAS: lylu_na_tela(T_TAREFAS, 40, 120); lylu_mostra(A_TAREFAS); break;
+    case T_RECADOS: lylu_na_tela(T_RECADOS, 672, 140); lylu_mostra(A_RECADOS); break;
+    case T_SEMANA:  lylu_na_tela(T_SEMANA, 672, 154); lylu_mostra(A_SEMANA); break;
+    case T_RELOGIO: lylu_na_tela(T_RELOGIO, 672, 130); lylu_mostra(A_RELOGIO); break;
+    case T_CASA:    lylu_na_tela(T_CASA, 600, 123); lylu_mostra(A_QUARTO); break;     // em cima do tapete
+    case T_AJUSTES: lylu_na_tela(T_AJUSTES, 672, 140); lylu_mostra(A_AJUSTES); break;
     }
 }
 
@@ -2512,8 +2497,7 @@ void app_main(void)
     lv_obj_set_style_bg_opa(tv, LV_OPA_TRANSP, 0);
     lv_obj_set_scrollbar_mode(tv, LV_SCROLLBAR_MODE_OFF);
     for (int i = 0; i < N_TELAS; i++) {
-        lv_dir_t d = i == 0 ? LV_DIR_RIGHT : i == N_TELAS - 1 ? LV_DIR_LEFT : LV_DIR_HOR;
-        tiles[i] = lv_tileview_add_tile(tv, i, 0, d);
+        tiles[i] = lv_tileview_add_tile(tv, i, 0, LV_DIR_NONE);   // sem arrastar: a barra de baixo troca
         lv_obj_remove_flag(tiles[i], LV_OBJ_FLAG_SCROLLABLE);
     }
     lv_obj_add_event_cb(tv, ev_troca_tela, LV_EVENT_VALUE_CHANGED, NULL);
@@ -2543,7 +2527,6 @@ void app_main(void)
     atualiza_hora();
     atualizar();
     lv_timer_create(tique, 1000, NULL);
-    lv_timer_create(passo_casa, 33, NULL);
     lv_timer_create(passo_microfone, 60, NULL);
     lv_timer_create(sinal_pinta, 350, NULL);
     lv_timer_create(olha_rede, 200, NULL);
