@@ -77,7 +77,7 @@ static void carrega_gifs(void)
 }
 
 // ---------------------------------------------------------------- fontes
-static lv_font_t *f_corpo, *f_corpo_p, *f_corpo_g, *f_negrito, *f_negrito_p, *f_negrito_m, *f_negrito_g, *f_px_p, *f_px_m, *f_px_g, *f_px_relogio, *f_px_foco;
+static lv_font_t *f_corpo, *f_corpo_p, *f_corpo_g, *f_negrito, *f_negrito_p, *f_negrito_m, *f_negrito_g, *f_px_p, *f_px_m, *f_relogio, *f_px_foco;
 
 static lv_font_t *ttf(const uint8_t *ini, const uint8_t *fim, int tam)
 {
@@ -95,9 +95,8 @@ static void carrega_fontes(void)
     f_negrito_g = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 34);
     f_px_p    = ttf(pixel_ttf_start, pixel_ttf_end, 20);
     f_px_m    = ttf(pixel_ttf_start, pixel_ttf_end, 38);
-    f_px_g    = ttf(pixel_ttf_start, pixel_ttf_end, 60);
     f_px_foco = ttf(pixel_ttf_start, pixel_ttf_end, 84);
-    f_px_relogio = ttf(pixel_ttf_start, pixel_ttf_end, 210);
+    f_relogio = ttf(corpo_negrito_ttf_start, corpo_negrito_ttf_end, 128);
 }
 
 // ---------------------------------------------------------------- estado
@@ -121,7 +120,7 @@ static char tarefa_atual[64] = "O que você quiser";
 static struct { bool rodando; int resto, bloco, feitos; } foco = { false, 25 * 60, 1, 0 };
 static struct { bool rodando, longa; int resto, cuidado; } pausa = { false, false, 5 * 60, -1 };
 
-enum { T_FOCO, T_TAREFAS, T_RECADOS, T_CASA, T_RELOGIO, T_SEMANA, T_AJUSTES, N_TELAS };
+enum { T_FOCO, T_TAREFAS, T_RECADOS, T_SEMANA, T_RELOGIO, T_CASA, T_AJUSTES, N_TELAS };   // a ordem do modelo
 static int tela_atual = T_FOCO;
 
 static int64_t agora_ms(void) { return esp_timer_get_time() / 1000; }
@@ -140,7 +139,6 @@ static lv_obj_t *lylu, *lylu_outra;  // dois GIFs que se revezam; ver lylu_mostr
 static anim_t lylu_anim = A_TOTAL;
 static lv_obj_t *st_hora, *st_missao, *st_humor, *st_humor_ponto, *st_gentil;
 static lv_obj_t *tar_balao, *lista_missao, *lista_bonus, *caixa_bonus, *btn_cortar;
-static lv_obj_t *rel_hora, *rel_seg, *rel_data;
 static lv_obj_t *aj_dificil;
 
 static void atualizar(void);
@@ -226,6 +224,47 @@ static lv_obj_t *cartao(lv_obj_t *pai)
     lv_obj_set_style_border_width(c, 1, 0);
     lv_obj_set_style_radius(c, 14, 0);
     return c;
+}
+
+// Cabeçalho das telas: a etiqueta em oliva com o pontinho, o título e, se tiver,
+// a linha de baixo. Filhos da coluna: 0 = linha da etiqueta (o texto é o filho 1
+// dela), 1 = título, 2 = linha de baixo.
+static lv_obj_t *cabeca(lv_obj_t *t, int x, const char *tag, const char *titulo, const char *sub, int largura)
+{
+    lv_obj_t *col = caixa(t);
+    lv_obj_set_pos(col, x, 84);
+    lv_obj_set_width(col, largura);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(col, 6, 0);
+    lv_obj_t *linha = caixa(col);
+    lv_obj_set_flex_flow(linha, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(linha, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(linha, 10, 0);
+    lv_obj_t *ponto = caixa(linha);
+    lv_obj_set_size(ponto, 6, 6);
+    lv_obj_set_style_radius(ponto, 3, 0);
+    lv_obj_set_style_bg_color(ponto, C_OLIVA, 0);
+    lv_obj_set_style_bg_opa(ponto, LV_OPA_COVER, 0);
+    texto(linha, tag, f_negrito_p, C_OLIVA);
+    if (titulo) texto(col, titulo, f_negrito_g, C_TINTA);
+    if (sub) {
+        lv_obj_t *l = texto(col, sub, f_corpo_p, C_FRACO);
+        lv_obj_set_width(l, LV_PCT(100));
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    }
+    return col;
+}
+
+static lv_obj_t *pilula(lv_obj_t *pai, const char *s, lv_color_t cor)
+{
+    lv_obj_t *p = caixa(pai);
+    lv_obj_set_style_bg_color(p, C_LINHA, 0);
+    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(p, 99, 0);
+    lv_obj_set_style_pad_hor(p, 10, 0);
+    lv_obj_set_style_pad_ver(p, 3, 0);
+    texto(p, s, f_corpo_p, cor);
+    return p;
 }
 
 static lv_obj_t *botao(lv_obj_t *pai, const char *s, bool principal, lv_event_cb_t cb)
@@ -1172,6 +1211,16 @@ static anim_t anim_foco(void)
 }
 
 // ---------------------------------------------------------------- TAREFAS
+// A missão do dia em cima, o bônus embaixo, a Lylu do lado esquerdo olhando.
+static lv_obj_t *tar_contador, *tar_feitas;
+
+static int feitas_hoje(void)
+{
+    int n = missao_feita();
+    for (int i = 0; i < (int)N_BONUS; i++) n += bonus[i].f;
+    return n;
+}
+
 static void ev_tarefa(lv_event_t *e)
 {
     tarefa_t *t = lv_event_get_user_data(e);
@@ -1188,74 +1237,87 @@ static void item(lv_obj_t *pai, tarefa_t *t, bool grande)
     lv_obj_set_flex_flow(linha, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(linha, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(linha, 14, 0);
-    lv_obj_set_style_pad_ver(linha, grande ? 9 : 6, 0);
+    lv_obj_set_style_pad_ver(linha, grande ? 8 : 5, 0);
     lv_obj_add_flag(linha, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(linha, ev_tarefa, LV_EVENT_CLICKED, t);
 
-    int lado = grande ? 28 : 22;
+    int lado = grande ? 26 : 22;
     lv_obj_t *cx = caixa(linha);
     lv_obj_set_size(cx, lado, lado);
-    lv_obj_set_style_radius(cx, grande ? 8 : 6, 0);
-    lv_obj_set_style_border_width(cx, grande ? 3 : 2, 0);
+    lv_obj_set_style_radius(cx, grande ? 7 : 6, 0);
+    lv_obj_set_style_border_width(cx, 2, 0);
     lv_obj_t *v = texto(cx, LV_SYMBOL_OK, &lv_font_montserrat_14, C_ESCURO);
     lv_obj_center(v);
 
     lv_obj_t *l = texto(linha, t->t, grande ? f_negrito : f_corpo, C_TINTA);
     lv_obj_set_flex_grow(l, 1);
 
-    lv_color_t c = grande ? C_TINTA : lv_color_hex(0xcfcadf);
-    lv_obj_set_style_border_color(cx, t->f ? C_OLIVA : c, 0);
+    lv_obj_set_style_border_color(cx, t->f ? C_OLIVA : C_FRACO, 0);
     lv_obj_set_style_bg_color(cx, C_OLIVA, 0);
     lv_obj_set_style_bg_opa(cx, t->f ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     if (!t->f) lv_obj_add_flag(v, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_set_style_text_color(l, t->f ? C_FRACO : c, 0);
+    lv_obj_set_style_text_color(l, t->f ? C_FRACO : C_TINTA, 0);
     lv_obj_set_style_text_decor(l, t->f ? LV_TEXT_DECOR_STRIKETHROUGH : LV_TEXT_DECOR_NONE, 0);
+}
+
+static lv_obj_t *cartao_lista(lv_obj_t *pai, const char *titulo, const char *pil, lv_color_t pil_cor, lv_obj_t **lista)
+{
+    lv_obj_t *c = cartao(pai);
+    lv_obj_set_width(c, LV_PCT(100));
+    lv_obj_set_style_pad_hor(c, 20, 0);
+    lv_obj_set_style_pad_ver(c, 14, 0);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+    lv_obj_t *topo = caixa(c);
+    lv_obj_set_width(topo, LV_PCT(100));
+    lv_obj_set_flex_flow(topo, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(topo, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    texto(topo, titulo, f_negrito, C_TINTA);
+    pilula(topo, pil, pil_cor);
+    lv_obj_t *l = *lista = caixa(c);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_obj_set_flex_flow(l, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_top(l, 4, 0);
+    return c;
 }
 
 static void cria_tarefas(lv_obj_t *t)
 {
+    cabeca(t, 420, "HOJE", "Missão do dia", NULL, 400);
+
+    lv_obj_t *cont = caixa(t);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_align(cont, LV_ALIGN_TOP_RIGHT, -44, 100);
+    tar_contador = texto(cont, "", f_negrito_m, C_OLIVA);
+    texto(cont, "feito", f_corpo_p, C_FRACO);
+
     lv_obj_t *col = caixa(t);
-    lv_obj_set_size(col, 574, 500);
-    lv_obj_set_pos(col, 410, 64);
+    lv_obj_set_pos(col, 420, 172);
+    lv_obj_set_width(col, 560);
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(col, 22, 0);
+    lv_obj_set_style_pad_row(col, 14, 0);
 
-    lv_obj_t *m = caixa(col);
-    lv_obj_set_width(m, LV_PCT(100));
-    lv_obj_set_style_bg_color(m, lv_color_hex(0x2f2a26), 0);
-    lv_obj_set_style_bg_opa(m, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(m, C_AMBAR, 0);
-    lv_obj_set_style_border_width(m, 2, 0);
-    lv_obj_set_style_radius(m, 16, 0);
-    lv_obj_set_style_pad_hor(m, 20, 0);
-    lv_obj_set_style_pad_ver(m, 18, 0);
-    lv_obj_set_flex_flow(m, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(m, 2, 0);
-    texto(m, "Missão do dia", f_px_m, C_AMBAR);
-    texto(m, "Fez isso aqui, o dia tá ganho.", f_corpo_p, lv_color_hex(0xcdb79a));
-    lista_missao = caixa(m);
-    lv_obj_set_width(lista_missao, LV_PCT(100));
-    lv_obj_set_flex_flow(lista_missao, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_top(lista_missao, 8, 0);
-
+    lv_obj_t *m = cartao_lista(col, "Fez isso, o dia tá ganho.", "prioridade", C_AMBAR, &lista_missao);
     btn_cortar = lv_button_create(m);
     lv_obj_set_style_bg_opa(btn_cortar, LV_OPA_TRANSP, 0);
     lv_obj_set_style_shadow_width(btn_cortar, 0, 0);
-    lv_obj_set_style_border_color(btn_cortar, lv_color_hex(0x8a7556), 0);
+    lv_obj_set_style_border_color(btn_cortar, C_LINHA, 0);
     lv_obj_set_style_border_width(btn_cortar, 1, 0);
     lv_obj_set_style_radius(btn_cortar, 10, 0);
-    texto(btn_cortar, "Cortar a missão pra uma coisa só", f_corpo_p, lv_color_hex(0xe4cfae));
+    lv_obj_set_style_margin_top(btn_cortar, 6, 0);
+    texto(btn_cortar, "Cortar a missão pra uma coisa só", f_corpo_p, C_TINTA);
     lv_obj_add_event_cb(btn_cortar, ev_cortar, LV_EVENT_CLICKED, NULL);
 
-    caixa_bonus = caixa(col);
-    lv_obj_set_width(caixa_bonus, LV_PCT(100));
-    lv_obj_set_flex_flow(caixa_bonus, LV_FLEX_FLOW_COLUMN);
-    texto(caixa_bonus, "Bônus, se der", f_px_p, C_FRACO);
-    lista_bonus = caixa(caixa_bonus);
-    lv_obj_set_width(lista_bonus, LV_PCT(100));
-    lv_obj_set_flex_flow(lista_bonus, LV_FLEX_FLOW_COLUMN);
+    caixa_bonus = cartao_lista(col, "Bônus, se der", "sem pressa", C_OLIVA, &lista_bonus);
 
-    tar_balao = balao(t, 40, 64, 300);
+    lv_obj_t *rod = caixa(col);
+    lv_obj_set_width(rod, LV_PCT(100));
+    lv_obj_set_flex_flow(rod, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(rod, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    texto(rod, "O que sobrar vira dica amanhã.", f_corpo_p, C_FRACO);
+    tar_feitas = texto(rod, "", f_negrito_p, C_OLIVA);
+
+    tar_balao = balao(t, 30, 72, 290);
 }
 
 static void atualiza_tarefas(void)
@@ -1271,12 +1333,20 @@ static void atualiza_tarefas(void)
     else lv_obj_add_flag(btn_cortar, LV_OBJ_FLAG_HIDDEN);
 
     int f = missao_feita(), n = n_missao();
-    const char *fala;
-    if (f == n) fala = "Missão do dia batida! O resto é enfeite.";
-    else if (dificil) fala = cortada ? "Uma coisa só hoje. Já é o dia inteiro." : "Hoje é só isso aqui. Sem pressa.";
-    else if (f == 0) fala = n == 1 ? "Uma coisinha e o dia tá ganho. O resto é bônus." : "Duas coisinhas e o dia tá ganho. O resto é bônus.";
-    else fala = "Metade da missão já foi. Tô vendo, viu?";
-    balao_texto(tar_balao, fala);
+    char s[40];
+    snprintf(s, sizeof s, "%d de %d", f, n);
+    lv_label_set_text(tar_contador, s);
+    int h = feitas_hoje();
+    if (h == 1) strcpy(s, "1 coisa feita hoje");
+    else snprintf(s, sizeof s, "%d coisas feitas hoje", h);
+    lv_label_set_text(tar_feitas, s);
+
+    if (f == n) balao_fala(tar_balao, "Missão do dia batida!", "O resto é enfeite.");
+    else if (dificil) balao_fala(tar_balao, cortada ? "Uma coisa só hoje." : "Hoje é só isso aqui.",
+                                 cortada ? "Já é o dia inteiro." : "Sem pressa.");
+    else if (f == 0) balao_fala(tar_balao, n == 1 ? "Uma coisinha e o dia tá ganho." : "Duas coisinhas e o dia tá ganho.",
+                                "O resto é bônus.");
+    else balao_fala(tar_balao, "Metade da missão já foi.", "Tô vendo, viu?");
 }
 
 // ---------------------------------------------------------------- RECADOS
@@ -1436,10 +1506,24 @@ static void atualiza_recados(void)
     else balao_fala(rec_balao, r->fala, r->fala_forte);
 }
 
-// ---------------------------------------------------------------- CASA
-static struct { float x, alvo; anim_t fazendo; int64_t ate; } casa = { 360, 360, A_LENDO, 0 };
+// ---------------------------------------------------------------- CASA (o cantinho da Lylu)
+// Uma pausa sem culpa: três respiros curtos à esquerda, e o quarto dela à direita,
+// onde ela anda e faz as coisinhas dela quando ninguém pede nada.
+static struct { float x, alvo; anim_t fazendo; int64_t ate; } casa = { 540, 540, A_LENDO, 0 };
 static const anim_t ATIVIDADES[] = { A_LENDO, A_CAFE, A_BOLHAS, A_BRINCANDO, A_BOCEJANDO, A_DORMINDO, A_AGUA, A_NINTENDO };
 #define CASA_Y 250
+#define CASA_X_MIN 440      // antes disso ela passava por cima do texto
+#define CASA_X_MAX 660      // 1024 - 360 da largura dela
+static lv_obj_t *casa_balao;
+static int casa_respiro = -1;
+
+static const char *RESPIRO[3] = { "Respirar", "Beber água", "Alongar" };
+static const char *RESPIRO_FALA[3][2] = {
+    { "Inspira contando até quatro…", "Solta devagar. Eu faço junto." },
+    { "Um copo inteiro, tá?", "Eu bebo junto." },
+    { "Estica os braços pro alto.", "Ombro longe da orelha." },
+};
+static const anim_t RESPIRO_ANIM[3] = { A_BOLHAS, A_AGUA, A_BOCEJANDO };
 
 static lv_obj_t *retangulo(lv_obj_t *pai, int x, int y, int w, int h, uint32_t cor)
 {
@@ -1451,37 +1535,76 @@ static lv_obj_t *retangulo(lv_obj_t *pai, int x, int y, int w, int h, uint32_t c
     return o;
 }
 
+static void ev_respiro(lv_event_t *e)
+{
+    int i = (int)(intptr_t)lv_event_get_user_data(e);
+    casa_respiro = i;
+    casa.alvo = casa.x;                  // para de andar e faz junto
+    casa.fazendo = RESPIRO_ANIM[i];
+    casa.ate = agora_ms() + 20000;
+    atualizar();
+}
+
 static void cria_casa(lv_obj_t *t)
 {
-    lv_obj_t *parede = retangulo(t, 0, 0, TELA_W, 450, 0x262235);
-    lv_obj_set_style_bg_grad_color(parede, lv_color_hex(0x2c2740), 0);
-    lv_obj_set_style_bg_grad_dir(parede, LV_GRAD_DIR_VER, 0);
-    for (int i = 0; i < 8; i++) retangulo(t, i * 128, 450, 128, 150, (i % 2) ? 0x352b28 : 0x3a2f2c);
-    retangulo(t, 0, 450, TELA_W, 6, 0x4a3c36);
+    // o quarto
+    lv_obj_t *jan = retangulo(t, 760, 76, 220, 160, 0x2b4a3e);
+    lv_obj_set_style_radius(jan, 6, 0);
+    lv_obj_t *ceu = retangulo(jan, 8, 8, 204, 144, 0x16323a);
+    lv_obj_t *lua = retangulo(ceu, 132, 22, 38, 38, 0xe9e5c4);
+    lv_obj_set_style_radius(lua, LV_RADIUS_CIRCLE, 0);
+    retangulo(jan, 106, 8, 8, 144, 0x2b4a3e);
+    retangulo(jan, 8, 76, 204, 8, 0x2b4a3e);
 
-    lv_obj_t *jan = retangulo(t, 110, 90, 190, 150, 0x4b4460);
-    lv_obj_t *ceu = retangulo(jan, 10, 10, 170, 130, 0x46598a);
-    lv_obj_set_style_bg_grad_color(ceu, lv_color_hex(0x5a6f9a), 0);
-    lv_obj_set_style_bg_grad_dir(ceu, LV_GRAD_DIR_VER, 0);
-    retangulo(jan, 92, 10, 6, 130, 0x4b4460);
-    retangulo(jan, 10, 72, 170, 6, 0x4b4460);
-
-    lv_obj_t *quadro = retangulo(t, 734, 110, 120, 90, 0x5f6a2a);
-    lv_obj_set_style_border_color(quadro, lv_color_hex(0x6d5a45), 0);
-    lv_obj_set_style_border_width(quadro, 8, 0);
-
-    lv_obj_t *tapete = retangulo(t, 330, 520, 380, 44, 0x6b4a6e);
+    lv_obj_t *tapete = retangulo(t, 470, 540, 360, 40, 0x1a3329);
     lv_obj_set_style_radius(tapete, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_border_color(tapete, lv_color_hex(0x7d5a80), 0);
-    lv_obj_set_style_border_width(tapete, 8, 0);
+    lv_obj_set_style_border_color(tapete, lv_color_hex(0x2b4a3e), 0);
+    lv_obj_set_style_border_width(tapete, 6, 0);
 
-    lv_obj_t *vaso = retangulo(t, 898, 400, 56, 70, 0x7a4b35);
+    lv_obj_t *vaso = retangulo(t, 930, 470, 52, 62, 0x5a4030);
     lv_obj_set_style_radius(vaso, 10, 0);
-    const int folhas[3][3] = { { 880, 330, 0x5f7a36 }, { 916, 318, 0x6f8c3e }, { 896, 296, 0x7c9a44 } };
+    const int folhas[3][3] = { { 912, 404, 0x4f6d33 }, { 948, 392, 0x5f7f3c }, { 928, 370, 0x6f8c44 } };
     for (int i = 0; i < 3; i++) {
-        lv_obj_t *f = retangulo(t, folhas[i][0], folhas[i][1], 52, 52, folhas[i][2]);
+        lv_obj_t *f = retangulo(t, folhas[i][0], folhas[i][1], 50, 50, folhas[i][2]);
         lv_obj_set_style_radius(f, LV_RADIUS_CIRCLE, 0);
     }
+
+    // o lado de ler
+    cabeca(t, 44, "CANTINHO DA LYLU", "Uma pausa sem culpa",
+           "Escolhe um respiro curto. Não precisa transformar descanso em outra tarefa.", 380);
+    lv_obj_t *linha = caixa(t);
+    lv_obj_set_pos(linha, 44, 214);
+    lv_obj_set_flex_flow(linha, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(linha, 12, 0);
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *c = cartao(linha);
+        lv_obj_set_size(c, 118, 104);
+        lv_obj_set_style_pad_all(c, 14, 0);
+        lv_obj_add_flag(c, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_border_color(c, C_OLIVA, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(c, ev_respiro, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+        // os desenhinhos: um anel (respirar), uma gota (água), uma barra em pé (alongar)
+        lv_obj_t *ic = caixa(c);
+        lv_obj_set_pos(ic, 0, 0);
+        lv_obj_set_size(ic, i == 2 ? 8 : 22, i == 2 ? 26 : 22);
+        lv_obj_set_style_radius(ic, i == 2 ? 4 : LV_RADIUS_CIRCLE, 0);
+        if (i == 0) { lv_obj_set_style_border_color(ic, C_OLIVA, 0); lv_obj_set_style_border_width(ic, 3, 0); }
+        else { lv_obj_set_style_bg_color(ic, i == 1 ? C_CEU : C_OLIVA, 0); lv_obj_set_style_bg_opa(ic, LV_OPA_COVER, 0); }
+        lv_obj_t *l = texto(c, RESPIRO[i], f_negrito_p, C_TINTA);
+        lv_obj_set_width(l, 90);
+        lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+        lv_obj_align(l, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    }
+    lv_obj_t *r = texto(t, "Sem cronômetro. Volta quando quiser.", f_corpo_p, C_FRACO);
+    lv_obj_set_pos(r, 44, 336);
+
+    casa_balao = balao(t, 470, 72, 250);
+}
+
+static void atualiza_casa(void)
+{
+    if (casa_respiro >= 0) balao_fala(casa_balao, RESPIRO_FALA[casa_respiro][0], RESPIRO_FALA[casa_respiro][1]);
+    else balao_fala(casa_balao, "Faz um tempinho que você tá aí.", "Quer respirar comigo?");
 }
 
 static void passo_casa(lv_timer_t *tm)
@@ -1495,8 +1618,9 @@ static void passo_casa(lv_timer_t *tm)
         lv_obj_set_x(lylu_outra, (int)casa.x);
         lylu_mostra(casa.alvo > casa.x ? A_ANDA_DIR : A_ANDA_ESQ);
     } else if (agora_ms() > casa.ate) {
+        if (casa_respiro >= 0) { casa_respiro = -1; atualiza_casa(); }   // o respiro acabou
         if (casa.ate && esp_random() % 10 < 6) {
-            casa.alvo = 20 + esp_random() % 620;
+            casa.alvo = CASA_X_MIN + esp_random() % (CASA_X_MAX - CASA_X_MIN);
             casa.fazendo = ATIVIDADES[esp_random() % (sizeof ATIVIDADES / sizeof ATIVIDADES[0])];
         }
         casa.ate = agora_ms() + 5000 + esp_random() % 4000;
@@ -1507,101 +1631,182 @@ static void passo_casa(lv_timer_t *tm)
 }
 
 // ---------------------------------------------------------------- RELÓGIO
-static void cria_relogio(lv_obj_t *t)
-{
-    lv_obj_t *col = caixa(t);
-    lv_obj_set_pos(col, 60, 100);
-    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(col, 14, 0);
-    lv_obj_t *linha = caixa(col);
-    lv_obj_set_flex_flow(linha, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(linha, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
-    lv_obj_set_style_pad_column(linha, 12, 0);
-    rel_hora = texto(linha, "--:--", f_px_relogio, C_TINTA);
-    rel_seg = texto(linha, "00", f_px_g, C_FRACO);
-    lv_obj_set_style_pad_bottom(rel_seg, 34, 0);
-    rel_data = texto(col, "", f_corpo_g, C_FRACO);
-    lv_obj_t *prox = texto(col, "15:00  ·  Reunião com a gráfica", f_corpo, C_AMBAR);
-    lv_obj_set_style_pad_top(prox, 12, 0);
-}
+static lv_obj_t *rel_saud, *rel_hora, *rel_data, *rel_cartao, *rel_c_hora, *rel_c_nome, *rel_c_sub, *rel_balao;
 
-static const char *DIAS[] = { "domingo", "segunda", "terça", "quarta", "quinta", "sexta", "sábado" };
+static const char *DIAS[] = { "domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+                              "sexta-feira", "sábado" };
+static const char *DIAS_CURTO[] = { "DOM", "SEG", "TER", "QUA", "QUI", "SEX", "SÁB" };
 static const char *MESES[] = { "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
                                "agosto", "setembro", "outubro", "novembro", "dezembro" };
 
+// O primeiro recado ainda não visto, ou NULL.
+static recado_t *proximo_pendente(void)
+{
+    int i = proximo_recado(0);
+    return i < 0 ? NULL : &recados[i];
+}
+
+static void cria_relogio(lv_obj_t *t)
+{
+    lv_obj_t *cab = cabeca(t, 44, "", NULL, NULL, 560);
+    rel_saud = lv_obj_get_child(lv_obj_get_child(cab, 0), 1);
+    rel_hora = texto(t, "--:--", f_relogio, C_TINTA);
+    lv_obj_set_pos(rel_hora, 38, 100);
+    rel_data = texto(t, "", f_corpo_g, C_FRACO);
+    lv_obj_set_pos(rel_data, 46, 262);
+
+    lv_obj_t *c = rel_cartao = cartao(t);
+    lv_obj_set_pos(c, 44, 330);
+    lv_obj_set_width(c, 480);
+    lv_obj_set_style_pad_hor(c, 20, 0);
+    lv_obj_set_style_pad_ver(c, 16, 0);
+    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(c, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(c, 20, 0);
+    rel_c_hora = texto(c, "", f_negrito_m, C_OLIVA);
+    lv_obj_t *col = caixa(c);
+    lv_obj_set_flex_grow(col, 1);
+    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
+    rel_c_nome = texto(col, "", f_negrito, C_TINTA);
+    lv_obj_set_width(rel_c_nome, LV_PCT(100));
+    lv_label_set_long_mode(rel_c_nome, LV_LABEL_LONG_DOT);
+    rel_c_sub = texto(col, "", f_corpo_p, C_FRACO);
+
+    rel_balao = balao(t, 652, 72, 290);
+}
+
+// Chamada todo segundo, mas só mexe no que mudou: redesenhar o relógio grande
+// a cada segundo à toa pesava na tela.
 static void atualiza_hora(void)
 {
+    static int antes_min = -1, antes_dia = -1;
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
+    if (tm.tm_min == antes_min) return;
+    antes_min = tm.tm_min;
     char s[64];
     snprintf(s, sizeof s, "%02d:%02d", tm.tm_hour, tm.tm_min);
     lv_label_set_text(st_hora, s);
     lv_label_set_text(rel_hora, s);
-    snprintf(s, sizeof s, "%02d", tm.tm_sec);
-    lv_label_set_text(rel_seg, s);
-    snprintf(s, sizeof s, "%s, %d de %s", DIAS[tm.tm_wday], tm.tm_mday, MESES[tm.tm_mon]);
-    lv_label_set_text(rel_data, s);
+    const char *oi = tm.tm_hour < 5 ? "BOA NOITE, MICA" : tm.tm_hour < 12 ? "BOM DIA, MICA"
+                   : tm.tm_hour < 18 ? "BOA TARDE, MICA" : "BOA NOITE, MICA";
+    lv_label_set_text(rel_saud, oi);
+    if (tm.tm_mday != antes_dia) {
+        antes_dia = tm.tm_mday;
+        snprintf(s, sizeof s, "%s · %d de %s", DIAS[tm.tm_wday], tm.tm_mday, MESES[tm.tm_mon]);
+        lv_label_set_text(rel_data, s);
+    }
+}
+
+static void atualiza_relogio(void)
+{
+    recado_t *r = proximo_pendente();
+    if (r) {
+        lv_obj_remove_flag(rel_cartao, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(rel_c_hora, r->hora);
+        lv_label_set_text(rel_c_nome, r->titulo);
+        lv_label_set_text(rel_c_sub, r->dia);
+    } else lv_obj_add_flag(rel_cartao, LV_OBJ_FLAG_HIDDEN);
+
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    int h = tm.tm_hour;
+    if (h >= 20 || h < 5) balao_fala(rel_balao, "Hoje já deu, viu?", r ? "Amanhã eu te lembro do resto." : "Descansa, que amanhã tem mais.");
+    else if (h < 12) balao_fala(rel_balao, "Bom dia!", "Uma coisa de cada vez hoje.");
+    else if (h < 18) balao_fala(rel_balao, "Metade do dia já foi.", "Tá indo bem, viu?");
+    else balao_fala(rel_balao, "O dia tá acabando.", "Se der, fecha uma coisinha só.");
 }
 
 // ---------------------------------------------------------------- SEMANA
+// Por enquanto a placa só sabe do hoje: os outros dias ficam vazios, sem dado
+// inventado. Quando vier o histórico (Supabase), é só encher as colunas.
+static lv_obj_t *sem_col[7], *sem_nome[7], *sem_num[7], *sem_barras[7], *sem_total, *sem_prox;
+
 static void cria_semana(lv_obj_t *t)
 {
-    lv_obj_t *col = caixa(t);
-    lv_obj_set_pos(col, 40, 64);
-    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(col, 6, 0);
-    texto(col, "4 missões batidas", f_px_m, C_TINTA);
-    texto(col, "A semana conta dias ganhos, não tarefas que sobraram.", f_corpo, C_FRACO);
+    cabeca(t, 44, "SUA SEMANA", "Um dia de cada vez", NULL, 400);
 
-    static const struct { const char *nome; char tipo; } SEM[] = {
-        { "seg", 'c' }, { "ter", 'm' }, { "qua", 'c' }, { "qui", 's' }, { "sex", 'm' }, { "sáb", 'h' }, { "dom", 'f' } };
+    lv_obj_t *cont = caixa(t);
+    lv_obj_set_pos(cont, 404, 104);
+    lv_obj_set_width(cont, 200);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    sem_total = texto(cont, "", f_negrito, C_OLIVA);
+    texto(cont, "feitas hoje", f_corpo_p, C_FRACO);
+
     lv_obj_t *dias = caixa(t);
-    lv_obj_set_pos(dias, 40, 190);
+    lv_obj_set_pos(dias, 44, 176);
     lv_obj_set_flex_flow(dias, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_column(dias, 12, 0);
+    lv_obj_set_style_pad_column(dias, 11, 0);
     for (int i = 0; i < 7; i++) {
-        lv_obj_t *d = caixa(dias);
-        lv_obj_set_size(d, 76, 116);
-        lv_obj_set_style_bg_color(d, C_CARTAO, 0);
-        lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(d, 14, 0);
+        lv_obj_t *d = sem_col[i] = cartao(dias);
+        lv_obj_set_size(d, 70, 170);
+        lv_obj_set_style_pad_top(d, 12, 0);
         lv_obj_set_flex_flow(d, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_flex_align(d, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_row(d, 12, 0);
-        if (SEM[i].tipo == 'h') { lv_obj_set_style_outline_color(d, C_TINTA, 0); lv_obj_set_style_outline_width(d, 2, 0); }
-        texto(d, SEM[i].nome, f_px_p, C_FRACO);
-        lv_obj_t *mk = caixa(d);
-        lv_obj_set_size(mk, 46, 46);
-        lv_obj_set_style_radius(mk, LV_RADIUS_CIRCLE, 0);
-        const char *simb = "";
-        switch (SEM[i].tipo) {
-        case 'c': lv_obj_set_style_bg_color(mk, C_OLIVA, 0); lv_obj_set_style_bg_opa(mk, LV_OPA_COVER, 0); simb = "*"; break;
-        case 'm': lv_obj_set_style_bg_color(mk, C_AMBAR, 0); lv_obj_set_style_bg_opa(mk, LV_OPA_COVER, 0); simb = LV_SYMBOL_OK; break;
-        case 's': lv_obj_set_style_border_color(mk, lv_color_hex(0x4f6d8f), 0); lv_obj_set_style_border_width(mk, 3, 0); simb = "~"; break;
-        default:  lv_obj_set_style_border_color(mk, C_LINHA, 0); lv_obj_set_style_border_width(mk, 2, 0); break;
-        }
-        lv_obj_t *sl = texto(mk, simb, SEM[i].tipo == 'm' ? &lv_font_montserrat_14 : f_px_p, SEM[i].tipo == 's' ? C_CEU : C_ESCURO);
-        lv_obj_center(sl);
+        lv_obj_set_flex_align(d, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(d, 2, 0);
+        sem_nome[i] = texto(d, DIAS_CURTO[i], f_corpo_p, C_FRACO);
+        sem_num[i] = texto(d, "", f_negrito, C_TINTA);
+        lv_obj_t *b = sem_barras[i] = caixa(d);
+        lv_obj_set_flex_flow(b, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_style_pad_row(b, 5, 0);
+        lv_obj_set_style_margin_top(b, 12, 0);
     }
 
-    lv_obj_t *leg = caixa(t);
-    lv_obj_set_pos(leg, 40, 330);
-    lv_obj_set_width(leg, 600);
-    lv_obj_set_flex_flow(leg, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_style_pad_column(leg, 22, 0);
-    lv_obj_set_style_pad_row(leg, 8, 0);
-    texto(leg, "* dia cheio", f_corpo_p, C_OLIVA);
-    texto(leg, LV_SYMBOL_OK, &lv_font_montserrat_14, C_AMBAR);
-    lv_obj_t *lm = texto(leg, "missão cumprida", f_corpo_p, C_AMBAR);
-    lv_obj_set_style_margin_left(lm, -16, 0);
-    texto(leg, "~ dia de sobrevivência (não conta contra)", f_corpo_p, C_CEU);
+    lv_obj_t *c = cartao(t);
+    lv_obj_set_pos(c, 44, 364);
+    lv_obj_set_width(c, 560);
+    lv_obj_set_style_pad_hor(c, 20, 0);
+    lv_obj_set_style_pad_ver(c, 14, 0);
+    sem_prox = texto(c, "", f_corpo, C_TINTA);
+    lv_obj_set_width(sem_prox, LV_PCT(100));
+    lv_label_set_long_mode(sem_prox, LV_LABEL_LONG_DOT);
 
-    texto(t, "dados de exemplo", f_corpo_p, lv_color_hex(0x6f6988));
-    lv_obj_set_pos(lv_obj_get_child(t, -1), 40, 530);
+    lv_obj_t *nota = texto(t, "Por enquanto eu só guardo o hoje. Os outros dias vêm depois.", f_corpo_p, C_FRACO);
+    lv_obj_set_pos(nota, 44, 432);
 
-    lv_obj_t *b = balao(t, 690, 74, 260);
-    balao_texto(b, "Quinta foi pesada e tá tudo bem. O resto da semana foi seu.");
+    lv_obj_t *b = balao(t, 652, 72, 290);
+    balao_fala(b, "A semana não é placar, Mica.", "É só um mapa pra eu te acompanhar.");
+}
+
+static void atualiza_semana(void)
+{
+    time_t now = time(NULL);
+    struct tm hoje;
+    localtime_r(&now, &hoje);
+    int feitas = feitas_hoje();
+    char s[80];
+    for (int i = 0; i < 7; i++) {
+        struct tm d = hoje;
+        d.tm_mday += i - hoje.tm_wday;       // de domingo a sábado desta semana
+        mktime(&d);
+        snprintf(s, sizeof s, "%02d", d.tm_mday);
+        lv_label_set_text(sem_num[i], s);
+        bool e_hoje = i == hoje.tm_wday;
+        lv_obj_set_style_border_color(sem_col[i], e_hoje ? C_OLIVA : C_LINHA, 0);
+        lv_obj_set_style_border_width(sem_col[i], e_hoje ? 2 : 1, 0);
+        lv_obj_set_style_text_color(sem_num[i], i > hoje.tm_wday ? C_FRACO : C_TINTA, 0);
+        lv_obj_clean(sem_barras[i]);
+        for (int k = 0; e_hoje && k < feitas && k < 8; k++) {
+            lv_obj_t *barra = caixa(sem_barras[i]);
+            lv_obj_set_size(barra, 44, 6);
+            lv_obj_set_style_radius(barra, 3, 0);
+            lv_obj_set_style_bg_color(barra, C_OLIVA, 0);
+            lv_obj_set_style_bg_opa(barra, LV_OPA_COVER, 0);
+        }
+    }
+    if (feitas == 1) strcpy(s, "1 coisa");
+    else snprintf(s, sizeof s, "%d coisas", feitas);
+    lv_label_set_text(sem_total, s);
+
+    recado_t *r = proximo_pendente();
+    if (r) {
+        snprintf(s, sizeof s, "%s, %s · %s", r->dia, r->hora, r->titulo);
+        if (s[0] >= 'a' && s[0] <= 'z') s[0] -= 'a' - 'A';   // "amanhã" -> "Amanhã"
+        lv_label_set_text(sem_prox, s);
+    } else lv_label_set_text(sem_prox, "Nada guardado pra frente. Semana leve.");
 }
 
 // ---------------------------------------------------------------- WI-FI
@@ -2033,31 +2238,39 @@ static void cria_microfone(void)
 }
 
 // ---------------------------------------------------------------- AJUSTES
+// Tudo numa lista só, com risquinho entre as linhas, e embaixo três cartõezinhos
+// com o estado da internet de verdade (nada de "online" inventado).
+static lv_obj_t *aj_brilho_v, *aj_info[3];
+
 static lv_obj_t *linha_ajuste(lv_obj_t *pai, const char *nome, const char *sub)
 {
     lv_obj_t *l = caixa(pai);
     lv_obj_set_width(l, LV_PCT(100));
-    lv_obj_set_style_bg_color(l, C_CARTAO, 0);
-    lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(l, 14, 0);
-    lv_obj_set_style_pad_hor(l, 20, 0);
-    lv_obj_set_style_pad_ver(l, 16, 0);
+    lv_obj_set_style_pad_ver(l, 9, 0);
+    lv_obj_set_style_border_side(l, LV_BORDER_SIDE_BOTTOM, 0);
+    lv_obj_set_style_border_width(l, 1, 0);
+    lv_obj_set_style_border_color(l, C_LINHA, 0);
     lv_obj_set_flex_flow(l, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(l, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(l, 12, 0);
     lv_obj_t *txt = caixa(l);
     lv_obj_set_flex_grow(txt, 1);
     lv_obj_set_flex_flow(txt, LV_FLEX_FLOW_COLUMN);
-    texto(txt, nome, f_corpo, C_TINTA);
-    if (sub) texto(txt, sub, f_corpo_p, C_FRACO);
+    texto(txt, nome, f_negrito_p, C_TINTA);
+    if (sub) {
+        lv_obj_t *s = texto(txt, sub, f_corpo_p, C_FRACO);
+        lv_obj_set_width(s, 380);
+        lv_label_set_long_mode(s, LV_LABEL_LONG_DOT);
+    }
     return l;
 }
 
 static lv_obj_t *chave(lv_obj_t *pai, bool ligada)
 {
     lv_obj_t *sw = lv_switch_create(pai);
-    lv_obj_set_size(sw, 62, 34);
+    lv_obj_set_size(sw, 56, 30);
     lv_obj_set_style_bg_color(sw, C_LINHA, 0);
-    lv_obj_set_style_bg_color(sw, C_CEU, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_set_style_bg_color(sw, C_OLIVA, LV_PART_INDICATOR | LV_STATE_CHECKED);
     if (ligada) lv_obj_add_state(sw, LV_STATE_CHECKED);
     return sw;
 }
@@ -2071,42 +2284,83 @@ static void ev_dificil(lv_event_t *e)
 
 static void ev_brilho(lv_event_t *e)
 {
-    placa_brilho(lv_slider_get_value(lv_event_get_target(e)));
+    int v = lv_slider_get_value(lv_event_get_target(e));
+    placa_brilho(v);
+    char s[8];
+    snprintf(s, sizeof s, "%d%%", v);
+    lv_label_set_text(aj_brilho_v, s);
 }
 
 static void cria_ajustes(lv_obj_t *t)
 {
-    lv_obj_t *col = caixa(t);
-    lv_obj_set_pos(col, 40, 64);
-    lv_obj_set_width(col, 600);
-    lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(col, 12, 0);
+    cabeca(t, 44, "CONFIGURAÇÕES", "Do seu jeito", NULL, 560);
 
-    lv_obj_t *lw = linha_ajuste(col, "Wi-Fi", "");
+    lv_obj_t *lista = cartao(t);
+    lv_obj_set_pos(lista, 44, 168);
+    lv_obj_set_width(lista, 560);
+    lv_obj_set_style_pad_hor(lista, 20, 0);
+    lv_obj_set_style_pad_ver(lista, 2, 0);
+    lv_obj_set_flex_flow(lista, LV_FLEX_FLOW_COLUMN);
+
+    lv_obj_t *lw = linha_ajuste(lista, "Wi-Fi", "");
     aj_wifi_sub = lv_obj_get_child(lv_obj_get_child(lw, 0), 1);
-    lv_obj_set_style_margin_right(sinal_cria(lw), 18, 0);
+    sinal_cria(lw);
     texto(lw, ">", f_px_p, C_FRACO);
     lv_obj_add_flag(lw, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(lw, ev_wifi_abre, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lm = linha_ajuste(col, "Microfone", "");
+
+    lv_obj_t *lm = linha_ajuste(lista, "Microfone", "");
     aj_mic_sub = lv_obj_get_child(lv_obj_get_child(lm, 0), 1);
     texto(lm, ">", f_px_p, C_FRACO);
     lv_obj_add_flag(lm, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(lm, ev_mic_abre, LV_EVENT_CLICKED, NULL);
 
-    aj_dificil = chave(linha_ajuste(col, "Dia difícil", "Só a missão aparece, sem cutucadas"), false);
+    aj_dificil = chave(linha_ajuste(lista, "Modo dia difícil", "Só a missão aparece, sem cutucadas"), false);
     lv_obj_add_event_cb(aj_dificil, ev_dificil, LV_EVENT_VALUE_CHANGED, NULL);
-    chave(linha_ajuste(col, "Silêncio no foco", "Nenhum som enquanto o timer roda"), true);
-    lv_obj_t *s = lv_slider_create(linha_ajuste(col, "Brilho", NULL));
-    lv_obj_set_width(s, 200);
+    chave(linha_ajuste(lista, "Silêncio no foco", "Nenhum som enquanto o timer roda"), true);
+
+    lv_obj_t *lb = linha_ajuste(lista, "Brilho da tela", "Arrasta pra deixar confortável");
+    lv_obj_set_style_border_width(lb, 0, 0);            // a última, sem risquinho
+    lv_obj_t *s = lv_slider_create(lb);
+    lv_obj_set_width(s, 150);
     lv_slider_set_range(s, 10, 100);
     lv_slider_set_value(s, 95, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(s, C_LINHA, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s, C_OLIVA, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s, C_TINTA, LV_PART_KNOB);
     lv_obj_add_event_cb(s, ev_brilho, LV_EVENT_VALUE_CHANGED, NULL);
+    aj_brilho_v = texto(lb, "95%", f_negrito_p, C_TINTA);
+    lv_obj_set_width(aj_brilho_v, 52);
+    lv_obj_set_style_text_align(aj_brilho_v, LV_TEXT_ALIGN_RIGHT, 0);
 
-    lv_obj_t *b = balao(t, 700, 80, 240);
-    balao_texto(b, "Mexe à vontade. Eu tô só olhando.");
+    static const char *INFO[3] = { "Internet", "Rede", "Endereço" };
+    lv_obj_t *linha = caixa(t);
+    lv_obj_set_pos(linha, 44, 470);
+    lv_obj_set_flex_flow(linha, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(linha, 10, 0);
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *c = cartao(linha);
+        lv_obj_set_width(c, 180);
+        lv_obj_set_style_pad_hor(c, 14, 0);
+        lv_obj_set_style_pad_ver(c, 10, 0);
+        lv_obj_set_flex_flow(c, LV_FLEX_FLOW_COLUMN);
+        texto(c, INFO[i], f_corpo_p, C_FRACO);
+        aj_info[i] = texto(c, "", f_negrito_p, C_TINTA);
+        lv_obj_set_width(aj_info[i], LV_PCT(100));
+        lv_label_set_long_mode(aj_info[i], LV_LABEL_LONG_DOT);
+    }
+
+    lv_obj_t *b = balao(t, 652, 72, 290);
+    balao_fala(b, "Se alguma coisa incomodar, a gente muda.", "A tela é sua.");
+}
+
+static void atualiza_ajustes(void)
+{
+    bool on = rede_estado() == REDE_CONECTADA;
+    lv_label_set_text(aj_info[0], on ? "conectada" : rede_estado() == REDE_CONECTANDO ? "entrando…" : "sem internet");
+    lv_obj_set_style_text_color(aj_info[0], on ? C_OLIVA : C_AMBAR, 0);
+    lv_label_set_text(aj_info[1], rede_nome()[0] ? rede_nome() : "nenhuma");
+    lv_label_set_text(aj_info[2], on ? rede_ip() : "—");
 }
 
 // ---------------------------------------------------------------- humor e atualização geral
@@ -2123,7 +2377,9 @@ static const char *humor(lv_color_t *cor)
     }
     if (missao_completa()) { *cor = C_AMBAR; return "comemorando"; }
     if (tela_atual == T_RECADOS) { *cor = C_CEU; return "cuidadora"; }
-    if (tela_atual == T_CASA || tela_atual == T_RELOGIO) { *cor = C_LILAS; return "brincalhona"; }
+    if (tela_atual == T_RELOGIO) { *cor = C_LILAS; return "tranquila"; }
+    if (tela_atual == T_CASA)    { *cor = C_LILAS; return "descansando"; }
+    if (tela_atual == T_AJUSTES) { *cor = C_CEU; return "atenta"; }
     *cor = C_OLIVA; return "animada";
 }
 
@@ -2151,6 +2407,14 @@ static void atualizar(void)
     atualiza_pomodoro();
     atualiza_linha_wifi();
     atualiza_linha_mic();
+    // Estas só se refazem quando estão à vista: ao chegar nelas, a troca de tela
+    // chama atualizar() de novo.
+    switch (tela_atual) {
+    case T_SEMANA:  atualiza_semana(); break;
+    case T_RELOGIO: atualiza_relogio(); break;
+    case T_CASA:    atualiza_casa(); break;
+    case T_AJUSTES: atualiza_ajustes(); break;
+    }
 
     if (wf_aberta) { atualiza_wifi(); return; }
     if (mf_aberta) { atualiza_microfone(); return; }
@@ -2158,13 +2422,11 @@ static void atualizar(void)
     switch (tela_atual) {
     case T_FOCO:    lylu_na_tela(T_FOCO, 640, 196); lylu_mostra(anim_foco()); break;
     case T_RECADOS: lylu_na_tela(T_RECADOS, 672, 178); lylu_mostra(A_FALA); break;
-    case T_TAREFAS: lylu_na_tela(T_TAREFAS, 20, 200);
-                    lylu_mostra(missao_completa() ? A_COMEMORANDO : dificil ? A_CUIDADORA : A_APONTANDO); break;
+    case T_TAREFAS: lylu_na_tela(T_TAREFAS, 20, 190); lylu_mostra(A_FALA); break;
     case T_CASA:    lylu_na_tela(T_CASA, (int)casa.x, CASA_Y); lylu_mostra(casa.fazendo); break;
-    case T_RELOGIO: lylu_na_tela(T_RELOGIO, 640, 170);
-                    lylu_mostra((agora_ms() / 12000) % 2 ? A_NINTENDO : A_BRINCANDO); break;
-    case T_SEMANA:  lylu_na_tela(T_SEMANA, 660, 200); lylu_mostra(A_COMEMORANDO); break;
-    case T_AJUSTES: lylu_na_tela(T_AJUSTES, 660, 200); lylu_mostra(A_PENSANDO); break;
+    case T_RELOGIO: lylu_na_tela(T_RELOGIO, 672, 178); lylu_mostra(A_FALA); break;
+    case T_SEMANA:  lylu_na_tela(T_SEMANA, 672, 178); lylu_mostra(A_FALA); break;
+    case T_AJUSTES: lylu_na_tela(T_AJUSTES, 672, 178); lylu_mostra(A_FALA); break;
     }
 }
 
@@ -2173,6 +2435,7 @@ static void ev_troca_tela(lv_event_t *e)
     lv_obj_t *ativa = lv_tileview_get_tile_active(tv);
     for (int i = 0; i < N_TELAS; i++) if (tiles[i] == ativa) tela_atual = i;
     recado_adiado = false;   // o "tá bom, te lembro depois" vale só pra quem acabou de tocar
+    casa_respiro = -1;
     atualizar();
 }
 
@@ -2202,8 +2465,6 @@ static void tique(lv_timer_t *t)
     if (foco.rodando && --foco.resto <= 0) fim_do_foco();
     else if (pausa.rodando && --pausa.resto <= 0) fim_da_pausa();
     else if (tela_atual == T_FOCO) tique_pomodoro();
-    if (tela_atual == T_RELOGIO && carinho_ate < agora_ms())
-        lylu_mostra((agora_ms() / 12000) % 2 ? A_NINTENDO : A_BRINCANDO);
 }
 
 // ---------------------------------------------------------------- hora inicial
