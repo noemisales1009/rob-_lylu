@@ -4,8 +4,10 @@
 // barramento do toque. É um chip de duas pontas: entrada de microfone e saída
 // para alto-falante.
 //
-// Por enquanto só a entrada: audio_nivel() diz o quão alto está o som agora, que
-// é o suficiente para a Lylu perceber que alguém falou com ela.
+// A entrada: audio_nivel() diz o quão alto está o som agora, o suficiente para a
+// Lylu perceber que alguém falou com ela. A saída vai para o alto-falante de
+// 2 pinos (conector MX 1.25 na borda, abaixo do cartão SD; o de cima do cartão é
+// a bateria), pelo amplificador NS4150 ligado no GPIO11.
 #pragma once
 #include <stdbool.h>
 
@@ -19,3 +21,6 @@ bool audio_escutando(void);
 // O volume do som agora, de 0 a 100. Sobe na hora e desce devagar, senão a
 // barra pisca a cada sílaba em vez de acompanhar a voz.
 int audio_nivel(void);
+
+// Um "blip" de três notas no alto-falante. Não espera tocar: volta na hora.
+void audio_blip(void);

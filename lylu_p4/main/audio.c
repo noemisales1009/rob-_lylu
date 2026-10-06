@@ -39,9 +39,10 @@ static const char *TAG = "audio";
 
 static int64_t agora_ms(void) { return esp_timer_get_time() / 1000; }
 
-static esp_codec_dev_handle_t ouvido;
+static esp_codec_dev_handle_t ouvido;   // entrada e saída: o mesmo ES8311 faz as duas
 static int nivel;
 static bool ligado;
+static TaskHandle_t voz;
 
 // ---------------------------------------------------------------- o barramento de som
 static bool monta_i2s(i2s_chan_handle_t *tx, i2s_chan_handle_t *rx)
@@ -95,6 +96,40 @@ static void escuta(void *p)
     }
 }
 
+// ---------------------------------------------------------------- falando
+// Um "blip" de três notas (dó, mi, sol), com as pontas suavizadas: começar ou
+// parar uma onda no meio dá um estalo no alto-falante.
+#define VOLUME 60
+
+static void nota(int16_t *buf, int n, float freq)
+{
+    const int rampa = TAXA / 100;                       // 10 ms de subida e descida
+    for (int i = 0; i < n; i++) {
+        float env = 1.0f;
+        if (i < rampa) env = (float)i / rampa;
+        else if (i > n - rampa) env = (float)(n - i) / rampa;
+        buf[i] = (int16_t)(9000.0f * env * sinf(2.0f * (float)M_PI * freq * i / TAXA));
+    }
+}
+
+static void fala(void *p)
+{
+    static const float NOTAS[3] = { 523.25f, 659.25f, 783.99f };
+    const int n = TAXA * 120 / 1000, pausa = TAXA * 30 / 1000;    // 120 ms cada, 30 ms entre
+    int16_t *buf = calloc(n + pausa, sizeof *buf);
+    if (!buf) { vTaskDelete(NULL); return; }
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        for (int k = 0; k < 3; k++) {
+            nota(buf, n, NOTAS[k]);
+            memset(buf + n, 0, pausa * sizeof *buf);
+            esp_codec_dev_write(ouvido, buf, (n + pausa) * sizeof *buf);
+        }
+    }
+}
+
+void audio_blip(void) { if (voz) xTaskNotifyGive(voz); }
+
 // ---------------------------------------------------------------- começo
 void audio_iniciar(void)
 {
@@ -125,7 +160,7 @@ void audio_iniciar(void)
     if (!codec) { ESP_LOGE(TAG, "o ES8311 não aceitou a configuração"); return; }
 
     esp_codec_dev_cfg_t cfg_dev = {
-        .dev_type = ESP_CODEC_DEV_TYPE_IN, .codec_if = codec, .data_if = dados,
+        .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT, .codec_if = codec, .data_if = dados,
     };
     ouvido = esp_codec_dev_new(&cfg_dev);
     if (!ouvido) { ESP_LOGE(TAG, "não montei o dispositivo de áudio"); return; }
@@ -136,10 +171,13 @@ void audio_iniciar(void)
     int e = esp_codec_dev_open(ouvido, &fs);
     if (e != ESP_CODEC_DEV_OK) { ESP_LOGE(TAG, "esp_codec_dev_open falhou (%d)", e); return; }
     esp_codec_dev_set_in_gain(ouvido, 30.0);
+    esp_codec_dev_set_out_vol(ouvido, VOLUME);
 
     ligado = true;
     xTaskCreate(escuta, "escuta", 4096, NULL, 4, NULL);
+    xTaskCreate(fala, "fala", 4096, NULL, 4, &voz);
     ESP_LOGI(TAG, "microfone de pé — fala alguma coisa");
+    audio_blip();                // o alto-falante (no conector da borda, abaixo do cartão SD) dá oi
 }
 
 bool audio_escutando(void) { return ligado; }

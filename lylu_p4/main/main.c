@@ -12,12 +12,14 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "lvgl.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "gif/lv_gif_private.h"   // copia corrigida do GIF da LVGL (ver gif/gifdec.c)
 #include "audio.h"
 #include "placa.h"
+#include "ponte.h"
 #include "rede.h"
 
 static const char *TAG = "lylu";
@@ -442,6 +444,7 @@ static void fim_carinho(lv_timer_t *t) { atualizar(); }
 static void ev_carinho(lv_event_t *e)
 {
     carinho_ate = agora_ms() + 2600;
+    audio_blip();
     atualizar();
     lv_timer_t *t = lv_timer_create(fim_carinho, 2700, NULL);
     lv_timer_set_repeat_count(t, 1);
@@ -2110,8 +2113,17 @@ static void cria_wifi(void)
 static volatile bool rede_mudou;
 static void ev_rede(void) { rede_mudou = true; }
 
+static volatile bool ponte_mudou;          // a ponte avisou (ver AJUSTES)
+static void atualiza_linha_ponte(void);
+static void mostra_fala_da_ponte(void);
+
 static void olha_rede(lv_timer_t *t)
 {
+    if (ponte_mudou) {
+        ponte_mudou = false;
+        atualiza_linha_ponte();
+        mostra_fala_da_ponte();
+    }
     if (!rede_mudou) return;
     rede_mudou = false;
     atualizar();
@@ -2220,13 +2232,66 @@ static void cria_microfone(void)
 // ---------------------------------------------------------------- AJUSTES
 // Tudo numa lista só, com risquinho entre as linhas, e embaixo três cartõezinhos
 // com o estado da internet de verdade (nada de "online" inventado).
-static lv_obj_t *aj_brilho_v, *aj_info[3];
+static lv_obj_t *aj_brilho_v, *aj_info[3], *aj_ponte_sub, *aj_balao;
+
+// ---- a ponte com o Hermes (ver ponte.h) ----
+// A resposta chega pela tarefa da ponte, não pela da tela: ela só guarda o texto
+// e levanta uma bandeira, e o timer da tela (olha_rede) mostra. Esperar a trava
+// da tela lá dentro seguraria a ponte inteira enquanto a tela desenha.
+#define FALA_MAX 280                 // o balão dos Ajustes não comporta mais que isso
+static char ponte_fala[FALA_MAX + 4];
+static volatile bool ponte_fala_nova;
+static portMUX_TYPE ponte_trava = portMUX_INITIALIZER_UNLOCKED;
+
+static void ev_ponte(const char *fala, bool online)
+{
+    (void)online;
+    if (fala) {
+        portENTER_CRITICAL(&ponte_trava);
+        strlcpy(ponte_fala, fala, FALA_MAX + 1);
+        if (strlen(fala) > FALA_MAX) strcpy(ponte_fala + FALA_MAX - 3, "...");
+        ponte_fala_nova = true;
+        portEXIT_CRITICAL(&ponte_trava);
+    }
+    ponte_mudou = true;
+}
+
+static void atualiza_linha_ponte(void)
+{
+    if (!aj_ponte_sub) return;
+    lv_label_set_text(aj_ponte_sub,
+        !ponte_configurada() ? "Ainda não pareada com o servidor" :
+        ponte_online() ? "Conectada ao Hermes" : "Esperando a ponte responder");
+    lv_obj_set_style_text_color(aj_ponte_sub, ponte_online() ? C_OLIVA : C_FRACO, 0);
+}
+
+static void mostra_fala_da_ponte(void)
+{
+    if (!ponte_fala_nova) return;
+    char fala[FALA_MAX + 4];
+    portENTER_CRITICAL(&ponte_trava);
+    strcpy(fala, ponte_fala);
+    ponte_fala_nova = false;
+    portEXIT_CRITICAL(&ponte_trava);
+    balao_fala(aj_balao, fala, NULL);
+    audio_blip();
+}
+
+static void ev_testar_ponte(lv_event_t *e)
+{
+    if (!ponte_configurada())
+        balao_fala(aj_balao, "Falta meu token de pareamento.", "Ele não vai pro Git, relaxa.");
+    else if (ponte_enviar_texto("Teste da Lylu física: responda apenas confirmando que você me encontrou."))
+        balao_fala(aj_balao, "Enviei pro Hermes.", "Agora eu espero a resposta.");
+    else
+        balao_fala(aj_balao, "A fila não respondeu.", "Tenta de novo quando a conexão estiver verde.");
+}
 
 static lv_obj_t *linha_ajuste(lv_obj_t *pai, const char *nome, const char *sub)
 {
     lv_obj_t *l = caixa(pai);
     lv_obj_set_width(l, LV_PCT(100));
-    lv_obj_set_style_pad_ver(l, 9, 0);
+    lv_obj_set_style_pad_ver(l, 6, 0);
     lv_obj_set_style_border_side(l, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_width(l, 1, 0);
     lv_obj_set_style_border_color(l, C_LINHA, 0);
@@ -2289,6 +2354,13 @@ static void cria_ajustes(lv_obj_t *t)
     lv_obj_add_flag(lw, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(lw, ev_wifi_abre, LV_EVENT_CLICKED, NULL);
 
+    lv_obj_t *lp = linha_ajuste(lista, "Conexão Lylu", "");
+    aj_ponte_sub = lv_obj_get_child(lv_obj_get_child(lp, 0), 1);
+    lv_obj_t *bt = botao(lp, "Testar", false, ev_testar_ponte);
+    lv_obj_set_style_pad_ver(bt, 6, 0);
+    lv_obj_set_style_border_color(bt, C_LINHA, 0);
+    lv_obj_set_style_border_width(bt, 1, 0);
+
     lv_obj_t *lm = linha_ajuste(lista, "Microfone", "");
     aj_mic_sub = lv_obj_get_child(lv_obj_get_child(lm, 0), 1);
     texto(lm, ">", f_px_p, C_FRACO);
@@ -2315,7 +2387,7 @@ static void cria_ajustes(lv_obj_t *t)
 
     static const char *INFO[3] = { "Internet", "Rede", "Endereço" };
     lv_obj_t *linha = caixa(t);
-    lv_obj_set_pos(linha, 44, 470);
+    lv_obj_set_pos(linha, 44, 474);
     lv_obj_set_flex_flow(linha, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_column(linha, 10, 0);
     for (int i = 0; i < 3; i++) {
@@ -2330,8 +2402,8 @@ static void cria_ajustes(lv_obj_t *t)
         lv_label_set_long_mode(aj_info[i], LV_LABEL_LONG_DOT);
     }
 
-    lv_obj_t *b = balao(t, 652, 72, 290);
-    balao_fala(b, "Se alguma coisa incomodar, a gente muda.", "A tela é sua.");
+    aj_balao = balao(t, 652, 72, 290);
+    balao_fala(aj_balao, "Se alguma coisa incomodar, a gente muda.", "A tela é sua.");
 }
 
 static void atualiza_ajustes(void)
@@ -2391,6 +2463,7 @@ static void atualizar(void)
     atualiza_pomodoro();
     atualiza_linha_wifi();
     atualiza_linha_mic();
+    atualiza_linha_ponte();
     // Estas só se refazem quando estão à vista: ao chegar nelas, a troca de tela
     // chama atualizar() de novo.
     switch (tela_atual) {
@@ -2534,6 +2607,7 @@ void app_main(void)
 
     audio_iniciar();         // ES8311: se não responder, ela segue surda e nada quebra
     rede_iniciar(ev_rede);   // demora uns segundos e pode não achar o C6; a tela já está de pé
+    ponte_iniciar(ev_ponte); // só o token estreito da placa; nenhuma chave do Hermes fica aqui
     // Os tempos do pomodoro moram na NVS, e quem abre a NVS é a rede. Abrir
     // antes dela, no começo do app_main, derrubava o DHCP: associava na rede e o
     // IP nunca chegava (três boots seguidos; só mudar isto de lugar resolveu).

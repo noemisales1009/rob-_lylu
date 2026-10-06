@@ -21,3 +21,7 @@ xiaozhi-esp32-lylu/
 
 # Configuração local do editor
 .vscode/
+
+# Token de pareamento da placa com a ponte Lylu/Hermes. Fica só nesta máquina;
+# o molde sem segredo é o secrets.example.h.
+lylu_p4/main/secrets.h
