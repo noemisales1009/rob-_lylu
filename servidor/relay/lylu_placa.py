@@ -79,7 +79,7 @@ def monta(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
         return "estado", {"marcar": {"alvo": args.alvo, "f": not args.desfazer}}
     if c == "recado":
         r: dict[str, Any] = {"titulo": args.titulo}
-        for campo in ("id", "quando", "dia", "hora", "detalhe", "tipo", "fala", "forte"):
+        for campo in ("id", "quando", "dia", "hora", "turno", "detalhe", "tipo", "fala", "forte"):
             valor = getattr(args, campo)
             if valor:
                 r[campo] = valor
@@ -149,6 +149,8 @@ def main() -> None:
     s.add_argument("--quando", help="AAAA-MM-DD ou AAAA-MM-DDTHH:MM (a placa calcula hoje/amanhã)")
     s.add_argument("--dia", help="texto livre, se não houver data (ex.: 'semana que vem')")
     s.add_argument("--hora", help="HH:MM, se não vier no --quando")
+    s.add_argument("--turno", choices=("manha", "tarde", "noite"),
+                   help="para lembrete sem hora certa: a placa mostra 'HOJE · À NOITE'")
     s.add_argument("--detalhe")
     s.add_argument("--tipo", help="etiqueta: lembrete, compromisso, ideia... (padrão lembrete)")
     s.add_argument("--fala", help="o que a Lylu diz no balão sobre ele")

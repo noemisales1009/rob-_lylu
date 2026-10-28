@@ -117,7 +117,9 @@ static void carrega_fontes(void)
 // ("assert failed: vApplicationGetIdleTaskMemory ... pxStackBufferTemp != NULL").
 #define MAX_MISSAO 3
 #define MAX_BONUS  6
-typedef struct { char id[40]; char t[96]; bool f; } tarefa_t;
+// pendente: não foi feita no dia dela e passou para o seguinte ("de ontem"; ver
+// a virada do dia em HERMES).
+typedef struct { char id[40]; char t[96]; bool f, pendente; } tarefa_t;
 
 static tarefa_t *missao, *bonus;
 static int n_m, n_b;
@@ -1470,6 +1472,7 @@ static void item(lv_obj_t *pai, tarefa_t *t, bool grande)
 
     lv_obj_t *l = texto(linha, t->t, grande ? f_negrito : f_corpo, C_TINTA);
     lv_obj_set_flex_grow(l, 1);
+    if (t->pendente && !t->f) texto(linha, "de ontem", f_corpo_p, C_AMBAR);
 
     lv_obj_set_style_border_color(cx, t->f ? C_OLIVA : C_FRACO, 0);
     lv_obj_set_style_bg_color(cx, C_OLIVA, 0);
@@ -1583,7 +1586,9 @@ static void atualiza_tarefas(void)
 static const char *DIAS[] = { "domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
                               "sexta-feira", "sábado" };
 typedef struct {
-    char id[40], quando[20], dia[24], hora[8], titulo[96], detalhe[160], tipo[24], fala[120], fala_forte[120];
+    // turno: "manha", "tarde" ou "noite", para lembrete sem hora certa ("ir na
+    // farmácia à noite"): pedido da Mica em 28/10/2026. A hora, se vier, ganha.
+    char id[40], quando[20], dia[24], hora[8], turno[16], titulo[96], detalhe[160], tipo[24], fala[120], fala_forte[120];
     bool visto;
 } recado_t;
 
@@ -1635,7 +1640,20 @@ static void maiusculas(char *s)
     }
 }
 
+static const char *turno_falado(const char *t)
+{
+    return !strcmp(t, "manha") ? "de manhã" : !strcmp(t, "tarde") ? "à tarde" : !strcmp(t, "noite") ? "à noite" : "";
+}
+
+// O que vier ("à tarde", "Manhã", "de noite"...) vira "manha", "tarde" ou "noite".
+static void normaliza_turno(char *t)
+{
+    const char *n = strstr(t, "anh") ? "manha" : strstr(t, "tard") ? "tarde" : strstr(t, "noit") ? "noite" : "";
+    memmove(t, n, strlen(n) + 1);
+}
+
 // O dia e a hora de um recado, do jeito que se fala: "hoje", "amanhã", "sexta-feira", "12/11".
+// Sem hora certa, vale o turno: "à tarde". Quem chama dá espaço para "de manhã".
 static void recado_quando(const recado_t *r, char *dia, size_t nd, char *hora, size_t nh)
 {
     int a, m, d, hh = -1, mm = 0;
@@ -1655,10 +1673,11 @@ static void recado_quando(const recado_t *r, char *dia, size_t nd, char *hora, s
         else snprintf(dia, nd, "%02d/%02d", d, m);
         if (hh >= 0) snprintf(hora, nh, "%02d:%02d", hh, mm);
         else strlcpy(hora, r->hora, nh);
-        return;
+    } else {
+        strlcpy(dia, r->dia[0] ? r->dia : "logo", nd);
+        strlcpy(hora, r->hora, nh);
     }
-    strlcpy(dia, r->dia[0] ? r->dia : "logo", nd);
-    strlcpy(hora, r->hora, nh);
+    if (!hora[0]) strlcpy(hora, turno_falado(r->turno), nh);
 }
 
 static void avisa_recado(const char *tipo, const recado_t *r)
@@ -1774,13 +1793,15 @@ static void atualiza_recados(void)
     }
     if (recado_atual >= n_rec || recados[recado_atual].visto) recado_atual = proximo_recado(0);
     recado_t *r = &recados[recado_atual];
-    char s[64], dia[24], hora[8];
+    char s[64], dia[24], hora[16];
     recado_quando(r, dia, sizeof dia, hora, sizeof hora);
-    snprintf(s, sizeof s, "Tem uma coisa pra %s", dia);
+    bool por_turno = r->turno[0] && !strcmp(hora, turno_falado(r->turno));
+    snprintf(s, sizeof s, "Tem uma coisa pra %s%s%s", dia, por_turno ? " " : "", por_turno ? hora : "");
     lv_label_set_text(rec_titulo, s);
     lv_label_set_text(rec_sub, "Eu guardei aqui pra você não precisar guardar na cabeça.");
     lv_obj_remove_flag(rec_cartao, LV_OBJ_FLAG_HIDDEN);
     maiusculas(dia);
+    maiusculas(hora);                          // "à noite" -> "À NOITE", como o dia
     if (hora[0]) snprintf(s, sizeof s, "%s · %s", dia, hora);
     else strlcpy(s, dia, sizeof s);
     lv_label_set_text(rec_quando, s);
@@ -1963,7 +1984,7 @@ static void atualiza_relogio(void)
 {
     recado_t *r = proximo_pendente();
     if (r) {
-        char dia[24], hora[8];
+        char dia[24], hora[16];
         recado_quando(r, dia, sizeof dia, hora, sizeof hora);
         lv_obj_remove_flag(rel_cartao, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(rel_c_hora, hora[0] ? hora : "--:--");
@@ -2064,7 +2085,7 @@ static void atualiza_semana(void)
 
     recado_t *r = proximo_pendente();
     if (r) {
-        char dia[24], hora[8], p[160];
+        char dia[24], hora[16], p[160];
         recado_quando(r, dia, sizeof dia, hora, sizeof hora);
         if (hora[0]) snprintf(p, sizeof p, "%s, %s · %s", dia, hora, r->titulo);
         else snprintf(p, sizeof p, "%s · %s", dia, r->titulo);
@@ -2794,6 +2815,7 @@ static void le_tarefa(tarefa_t *t, cJSON *x)
     copia_campo(t->t, sizeof t->t, x, "t");
     cJSON *f = cJSON_GetObjectItemCaseSensitive(x, "f");
     t->f = cJSON_IsTrue(f);
+    t->pendente = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(x, "pendente"));
 }
 
 static tarefa_t *acha_igual(tarefa_t *lista, int n, const tarefa_t *t)
@@ -2818,6 +2840,8 @@ static int le_lista(tarefa_t *lista, int max, int n_antes, cJSON *arr)
         if (!nova.t[0]) continue;
         tarefa_t *velha = acha_igual(antes, n_antes, &nova);
         if (velha && !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(x, "f"))) nova.f = velha->f;
+        // A que veio de ontem continua "de ontem" quando o Hermes manda a lista do dia.
+        if (velha && !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(x, "pendente"))) nova.pendente = velha->pendente;
         lista[n++] = nova;
     }
     return n;
@@ -2846,6 +2870,8 @@ static void le_recado(recado_t *r, cJSON *x)
     copia_campo(r->quando, sizeof r->quando, x, "quando");
     copia_campo(r->dia, sizeof r->dia, x, "dia");
     copia_campo(r->hora, sizeof r->hora, x, "hora");
+    copia_campo(r->turno, sizeof r->turno, x, "turno");
+    normaliza_turno(r->turno);
     copia_campo(r->titulo, sizeof r->titulo, x, "titulo");
     copia_campo(r->detalhe, sizeof r->detalhe, x, "detalhe");
     copia_campo(r->tipo, sizeof r->tipo, x, "tipo");
@@ -3072,6 +3098,7 @@ static cJSON *tarefas_json(tarefa_t *lista, int n)
         if (lista[i].id[0]) cJSON_AddStringToObject(t, "id", lista[i].id);
         cJSON_AddStringToObject(t, "t", lista[i].t);
         cJSON_AddBoolToObject(t, "f", lista[i].f);
+        if (lista[i].pendente) cJSON_AddTrueToObject(t, "pendente");
         cJSON_AddItemToArray(a, t);
     }
     return a;
@@ -3084,12 +3111,13 @@ static cJSON *recados_json(bool para_guardar)
         recado_t *r = &recados[i];
         cJSON *o = cJSON_CreateObject();
         struct { const char *k, *v; } campos[] = {
-            { "id", r->id }, { "quando", r->quando }, { "dia", r->dia }, { "hora", r->hora },
+            { "id", r->id }, { "quando", r->quando }, { "dia", r->dia }, { "hora", r->hora }, { "turno", r->turno },
             { "titulo", r->titulo }, { "detalhe", r->detalhe }, { "tipo", r->tipo },
             { "fala", r->fala }, { "forte", r->fala_forte },
         };
+        // O retrato para o Hermes leva só os 7 primeiros; a NVS guarda tudo.
         for (size_t k = 0; k < sizeof campos / sizeof *campos; k++)
-            if (campos[k].v[0] && (para_guardar || k < 6)) cJSON_AddStringToObject(o, campos[k].k, campos[k].v);
+            if (campos[k].v[0] && (para_guardar || k < 7)) cJSON_AddStringToObject(o, campos[k].k, campos[k].v);
         cJSON_AddBoolToObject(o, "visto", r->visto);
         cJSON_AddItemToArray(a, o);
     }
@@ -3158,6 +3186,8 @@ static void tira_exemplos_guardados(void)
     nvs_close(h);
 }
 
+static void carrega_dia(void);
+
 static void carrega_hermes(void)
 {
     nvs_handle_t h;
@@ -3177,6 +3207,103 @@ static void carrega_hermes(void)
         nvs_close(h);
     }
     tira_exemplos_guardados();
+    carrega_dia();
+}
+
+// ---- a virada do dia ----
+// As tarefas são do dia (pedido da Mica, 28/10/2026). Às 5h, em silêncio, as
+// feitas saem e as que ficaram viram "de ontem"; das 9h em diante (fora do foco
+// e da Conversa) a placa conta para o Hermes, e ele avisa quais ficaram, passa
+// elas para hoje no Todoist e manda a lista do dia. Até a internet dar a hora
+// certa, nada vira: o relógio ainda está na hora da compilação.
+#define NVS_DIA "dia"                  // o dia das listas (AAAA-MM-DD), que começa às 5h
+#define NVS_AVISAR_DIA "avisar_dia"    // virou e ainda não avisou
+#define VIRA_HORA 5
+#define AVISA_HORA 9
+static char dia_listas[12];
+static bool avisar_dia;
+
+static void carrega_dia(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lylu", NVS_READONLY, &h) != ESP_OK) return;
+    size_t n = sizeof dia_listas;
+    if (nvs_get_str(h, NVS_DIA, dia_listas, &n) != ESP_OK) dia_listas[0] = 0;
+    uint8_t a = 0;
+    avisar_dia = nvs_get_u8(h, NVS_AVISAR_DIA, &a) == ESP_OK && a;
+    nvs_close(h);
+}
+
+static void grava_dia(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lylu", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, NVS_DIA, dia_listas);
+    nvs_set_u8(h, NVS_AVISAR_DIA, avisar_dia);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static int vira_lista(tarefa_t *lista, int n)
+{
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        if (lista[i].f) continue;              // feita: era de ontem, sai
+        lista[i].pendente = true;
+        lista[k++] = lista[i];
+    }
+    return k;
+}
+
+static void avisa_o_dia(void)
+{
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "tipo", "dia_novo");
+    cJSON_AddStringToObject(ev, "dia", dia_listas);
+    cJSON *p = cJSON_AddArrayToObject(ev, "pendentes");
+    for (int i = 0; i < n_m + n_b; i++) {
+        tarefa_t *t = i < n_m ? &missao[i] : &bonus[i - n_m];
+        if (t->f || !t->pendente) continue;
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "t", t->t);
+        if (t->id[0]) cJSON_AddStringToObject(o, "id", t->id);
+        cJSON_AddBoolToObject(o, "missao", i < n_m);
+        cJSON_AddItemToArray(p, o);
+    }
+    ESP_LOGI(TAG, "aviso do dia para o Hermes: %d de ontem", cJSON_GetArraySize(p));
+    avisa_hermes_em(ev, RESPOSTA_POMODORO_MS);   // ele fala: a ponte busca a resposta ligeiro
+    avisar_dia = false;
+    grava_dia();
+}
+
+static void confere_o_dia(void)
+{
+    if (!rede_hora_certa()) return;
+    time_t agora = time(NULL);
+    time_t base = agora - VIRA_HORA * 3600;     // antes das 5h ainda é o dia anterior
+    struct tm tm;
+    localtime_r(&base, &tm);
+    char hoje[12];
+    strftime(hoje, sizeof hoje, "%Y-%m-%d", &tm);
+    if (!dia_listas[0]) {                        // primeira vez: só anota o dia
+        strlcpy(dia_listas, hoje, sizeof dia_listas);
+        grava_dia();
+    } else if (strcmp(hoje, dia_listas)) {
+        int antes = n_m + n_b;
+        n_m = vira_lista(missao, n_m);
+        n_b = vira_lista(bonus, n_b);
+        cortada = false;
+        foco.feitos = 0;                         // "concluídos hoje" é de hoje
+        ESP_LOGI(TAG, "virou o dia (%s -> %s): %d feitas saíram, %d ficaram de ontem",
+                 dia_listas, hoje, antes - (n_m + n_b), n_m + n_b);
+        strlcpy(dia_listas, hoje, sizeof dia_listas);
+        avisar_dia = n_m + n_b > 0;              // sem pendente, não tem o que avisar
+        guarda_hermes();
+        grava_dia();
+        atualizar();
+    }
+    localtime_r(&agora, &tm);
+    if (avisar_dia && tm.tm_hour >= AVISA_HORA && !foco.rodando && cv_passo == CV_FECHADA) avisa_o_dia();
 }
 
 // ---- o retrato da tela, para o Hermes ----
@@ -3606,6 +3733,7 @@ static void tique(lv_timer_t *t)
     // do boot: repete aos 30 s, quando quem estava lendo já reabriu.
     if (++seg == 30) ESP_LOGW(TAG, "ligou por: %s (repetido para quem abriu o log agora)", ligou_por);
     if (seg % 300 == 0) loga_memoria("a cada 5 min");
+    if (seg % 30 == 10) confere_o_dia();         // a virada das 5h e o aviso das 9h
     if (foco.rodando && --foco.resto <= 0) fim_do_foco();
     else if (pausa.rodando && --pausa.resto <= 0) fim_da_pausa(false);
     else if (tela_atual == T_FOCO) tique_pomodoro();

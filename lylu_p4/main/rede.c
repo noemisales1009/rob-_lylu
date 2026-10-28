@@ -83,11 +83,20 @@ static void le_senha_guardada(void)
 // ---------------------------------------------------------------- hora certa
 // O primeiro presente de ter internet: o relógio para de mostrar a hora em que o
 // programa foi compilado. O fuso já foi ajustado em acerta_hora_inicial().
+// Até a internet responder, o relógio está na hora da compilação: quem decide
+// alguma coisa pelo dia (a virada das tarefas às 9h) espera rede_hora_certa().
+static volatile bool hora_certa;
+
+static void hora_chegou(struct timeval *tv) { hora_certa = true; }
+
+bool rede_hora_certa(void) { return hora_certa; }
+
 static void liga_a_hora_da_internet(void)
 {
     static bool feito = false;
     if (feito) return;
     esp_sntp_config_t c = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    c.sync_cb = hora_chegou;
     feito = esp_netif_sntp_init(&c) == ESP_OK;
 }
 

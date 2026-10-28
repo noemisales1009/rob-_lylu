@@ -89,6 +89,10 @@ julgadora e alertando.
   comprar, ligar, buscar, "lembrar de…" é **recado**: `recado "Ir à farmácia"
   --detalhe "Comprar o remédio" [--quando ...]`, nunca na missão nem no bônus.
   Ex.: "lembrar de ir na padaria" e "ir na farmácia comprar remédio" são recados.
+- **Lembrete tem quando.** Sempre `--quando AAAA-MM-DD` (o dia; sem dia dito, é
+  hoje) e, sem hora certa, `--turno manha|tarde|noite` ("à tarde", "de noite"...).
+  A placa mostra "HOJE · À NOITE". Se ela não disse nem dia nem turno, pergunte
+  numa frase curta ("pra quando: tarde ou noite?") em vez de inventar.
 - **Recado com data**: use `--quando` (AAAA-MM-DD ou AAAA-MM-DDTHH:MM). A placa
   calcula sozinha "hoje", "amanhã", "sexta"… Texto livre em `--dia` só quando
   não houver data.

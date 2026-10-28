@@ -257,6 +257,19 @@ def describe_event(payload: dict[str, Any]) -> str:
         return (f"A pausa de {payload.get('minutos', '?')} minutos da Mica acabou; agora vem o {proximo} "
                 f"em “{t}” ({volta}). AVISE em uma frase curta e gentil que a pausa acabou, sem cobrar. "
                 "Aqui não responda SILENCIO.")
+    # A virada do dia: às 5h a placa tira as feitas e marca o resto "de ontem"; às 9h
+    # manda isto. As tarefas são do dia (pedido da Mica, 28/10/2026).
+    if tipo == "dia_novo":
+        pend = payload.get("pendentes") or []
+        if not pend:
+            return "Virou o dia na placa e não ficou nada de ontem. Responda exatamente SILENCIO."
+        lista = "; ".join(f"“{p.get('t', '')}”" + (f" (id {p['id']})" if p.get("id") else "")
+                          + (" [era da missão]" if p.get("missao") else "") for p in pend)
+        return (f"Aviso do começo do dia (a placa manda das 9h em diante): ficaram {len(pend)} de ontem: {lista}. "
+                "AVISE a Mica, em uma ou duas "
+                "frases curtas e acolhedoras, quais ficaram (sem cobrar) e pergunte se ela quer manter hoje. No "
+                "Todoist, passe essas para hoje. Depois mande a lista do dia com lylu_placa.py tarefas: as de ontem "
+                "continuam com a etiqueta “de ontem” sozinhas. Aqui não responda SILENCIO.")
     if tipo == "recado_entendi":
         return f"Mica tocou em “Entendi” no recado “{payload.get('titulo', '')}”{ident}."
     if tipo == "recado_adiado":
