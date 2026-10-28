@@ -1,0 +1,219 @@
+diff -ru a/relay/lylu_bridge.py b/relay/lylu_bridge.py
+--- a/relay/lylu_bridge.py	2026-10-28 14:57:01.750027300 -0300
++++ b/relay/lylu_bridge.py	2026-10-28 14:57:48.308701600 -0300
+@@ -162,11 +162,16 @@
+ }
+ 
+ 
+-def instructions_for(via: str, device: dict[str, Any] | None) -> str:
++def instructions_for(via: str, device: dict[str, Any] | None, origem: str | None = None) -> str:
+     partes = [
+         "Você é a Lylu falando com a Mica pelo seu corpo físico: a placa na mesa de trabalho dela. "
+         "Responda em português do Brasil, com a personalidade da Lylu (acolhe, nunca cobra).",
+         COMO_FALAR.get(via, COMO_FALAR["chat"]),
++    ]
++    if origem == "app":
++        partes.append("Desta vez ela está no app do celular e pode estar longe da placa: a resposta aparece "
++                      "no celular e também na placa. Não peça para ela olhar a tela da placa.")
++    partes += [
+         "Se quiser mudar o humor que aparece na tela, comece a resposta com [humor: X], X sendo um de: "
+         + ", ".join(HUMORES) + ". No modo dia difícil, nunca julgadora nem alertando.",
+         "Para mudar tarefas, recados, humor ou o pomodoro na placa, use a skill lylu-placa (lylu_placa.py). "
+@@ -181,14 +186,15 @@
+     return "\n\n".join(partes)
+ 
+ 
+-def ask_hermes(settings: Settings, text: str, via: str = "chat", device: dict[str, Any] | None = None) -> str:
++def ask_hermes(settings: Settings, text: str, via: str = "chat", device: dict[str, Any] | None = None,
++               origem: str | None = None) -> str:
+     response = post_json(
+         f"{settings.hermes_url}/v1/responses",
+         {
+             "model": "lylu",
+             "conversation": settings.conversation,
+             "input": text,
+-            "instructions": instructions_for(via, device),
++            "instructions": instructions_for(via, device, origem),
+             "store": True,
+         },
+         {"authorization": f"Bearer {settings.hermes_key}"},
+@@ -272,7 +278,7 @@
+ 
+     def hermes(text: str, via: str) -> str:
+         t0 = time.monotonic()
+-        reply = ask_hermes(settings, text, via, device)
++        reply = ask_hermes(settings, text, via, device, payload.get("origem"))
+         LOG.info("tempo %s: Hermes %.1f s", request_id, time.monotonic() - t0)
+         return reply
+ 
+diff -ru a/supabase/functions/lylu-bridge/index.ts b/supabase/functions/lylu-bridge/index.ts
+--- a/supabase/functions/lylu-bridge/index.ts	2026-10-28 14:57:01.683239100 -0300
++++ b/supabase/functions/lylu-bridge/index.ts	2026-10-28 14:57:48.240553700 -0300
+@@ -16,11 +16,25 @@
+ // que continuam valendo com a placa desligada. O relay lê com "historico" e
+ // "listas". Precisa do SQL 20261028150000_historico_e_listas.sql.
+ //
++// O app do celular (role "app", mesmo device_id da placa) manda texto e voz pela
++// fila da placa, e a resposta continua indo para ela. O app lê uma cópia com
++// "resposta", sem buscar nem confirmar a fila da placa. Pedidos e respostas do
++// app levam origem "app": a voz dessas respostas fica até o TTL em vez de sumir
++// no ack, e o histórico diz de onde veio. CORS liberado para o app chamar direto.
++//
+ // Implantar SEM verificação de JWT (a placa não manda Authorization):
+ //   supabase functions deploy lylu-bridge --no-verify-jwt
+ import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
+ 
+-const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
++// O app chama do navegador/WebView. Sem cookie: a chave vai no x-lylu-token.
++const CORS = {
++  "access-control-allow-origin": "*",
++  "access-control-allow-methods": "GET, POST, OPTIONS",
++  "access-control-allow-headers": "content-type, x-lylu-token, x-lylu-action, x-lylu-formato, x-lylu-tela",
++  "access-control-expose-headers": "x-lylu-formato",
++  "access-control-max-age": "86400",
++};
++const JSON_HEADERS = { ...CORS, "content-type": "application/json; charset=utf-8" };
+ const MAX_BODY = 32_768;
+ const MAX_TEXT = 4_000;
+ const MAX_PAYLOAD = 16_384;            // estado e comandos vindos do Hermes
+@@ -49,7 +63,7 @@
+ function audioReply(bytes: Uint8Array): Response {
+   return new Response(bytes, {
+     status: 200,
+-    headers: { "content-type": "application/octet-stream", "x-lylu-formato": "pcm_s16le_16000" },
++    headers: { ...CORS, "content-type": "application/octet-stream", "x-lylu-formato": "pcm_s16le_16000" },
+   });
+ }
+ 
+@@ -270,7 +284,7 @@
+ }
+ 
+ // ---------------------------------------------------------------- a placa
+-async function deviceAction(db: Db, deviceId: string, action: string, body: Obj, audio: Uint8Array | null, formato: string, req: Request) {
++async function deviceAction(db: Db, deviceId: string, action: string, body: Obj, audio: Uint8Array | null, formato: string, req: Request, origem: string | null = null) {
+   if (action === "heartbeat") return reply(200, { ok: true });
+ 
+   if (action === "report") {
+@@ -286,7 +300,7 @@
+ 
+   if (action === "send") {
+     const kind = typeof body.kind === "string" && DEVICE_KINDS.has(body.kind) ? body.kind : "chat";
+-    const payload = body.payload;
++    const payload = origem && isObj(body.payload) ? { ...body.payload, origem } : body.payload;
+     if (!isObj(payload) || JSON.stringify(payload).length > MAX_PAYLOAD) return reply(400, { error: "invalid_payload" });
+     const text = payload.text;
+     if (kind === "chat" && (typeof text !== "string" || text.trim().length < 1 || text.length > MAX_TEXT)) {
+@@ -317,7 +331,7 @@
+       device_id: deviceId,
+       direction: "device_to_agent",
+       kind: "voz",
+-      payload: { audio_id: audioId, ms, formato, tela: req.headers.get("x-lylu-tela") || null },
++      payload: { audio_id: audioId, ms, formato, tela: req.headers.get("x-lylu-tela") || null, ...(origem ? { origem } : {}) },
+       status: "pending",
+     }).select("message_id").single();
+     if (error) {
+@@ -360,8 +374,11 @@
+       .eq("direction", "agent_to_device")
+       .in("message_id", ids);
+     if (error) return reply(500, { error: "ack_failed" });
+-    // Entregue = tocada (a placa só confirma depois de baixar o áudio).
+-    const audios = (rows || []).map((r) => payloadAudioId(r.payload)).filter((x): x is string => !!x);
++    // Entregue = tocada (a placa só confirma depois de baixar o áudio). A voz da
++    // resposta a um pedido do app fica até o TTL: o celular também vai ouvir.
++    const audios = (rows || [])
++      .filter((r) => !(isObj(r.payload) && r.payload.origem === "app"))
++      .map((r) => payloadAudioId(r.payload)).filter((x): x is string => !!x);
+     await audioDel(db, audios.map((id) => audioPath(deviceId, "out", id)));
+     return reply(200, { ok: true });
+   }
+@@ -420,6 +437,8 @@
+       deviceId = await resolveDevice(db, req.headers.get("x-lylu-device"));
+     }
+     if (!deviceId) return reply(404, { error: "device_not_found" });
++    // A voz das respostas ao app não some no ack: a limpeza roda também aqui.
++    await audioLimpaVelhos(db, deviceId);
+     const audioId = await audioUp(db, deviceId, "out", audio);
+     if (!audioId) return reply(500, { error: "audio_store_failed" });
+     return reply(200, { ok: true, audio_id: audioId, device_id: deviceId });
+@@ -436,21 +455,23 @@
+     const request = await processingRequest(db, requestId);
+     if (!request) return reply(409, { error: "request_not_processing" });
+     if (!silent) {
++      const pedido = isObj(request.payload) ? request.payload : {};
+       const payload: Obj = { text };
+       if (isUuid(body.audio_id)) payload.audio_id = body.audio_id;
+       if (typeof body.formato === "string" && body.formato in FORMATOS) payload.formato = body.formato;
+       if (typeof body.humor === "string" && body.humor.length <= 24) payload.humor = body.humor;
+       if (typeof body.forte === "string" && body.forte.length <= 200) payload.forte = body.forte;
+       if (typeof body.transcricao === "string") payload.transcricao = body.transcricao.slice(0, 500);
++      // A resposta a um pedido do app vai para a placa também, marcada (ver o ack).
++      if (pedido.origem === "app") payload.origem = "app";
+       const { error: insertError } = await enqueueToDevice(db, request.device_id as string, "chat", payload, requestId);
+       if (insertError) return reply(500, { error: "response_enqueue_failed" });
+-      const pedido = isObj(request.payload) ? request.payload : {};
+       if (request.kind === "event") {
+         await registra(db, request.device_id as string, "comentario", { sobre: pedido.tipo ?? null, resposta: text });
+       } else {
+         const pergunta = request.kind === "voz" ? payload.transcricao ?? null : pedido.text ?? null;
+         await registra(db, request.device_id as string, "conversa",
+-          { via: request.kind, pergunta, resposta: text, humor: payload.humor ?? null });
++          { via: request.kind, origem: pedido.origem === "app" ? "app" : "placa", pergunta, resposta: text, humor: payload.humor ?? null });
+       }
+     }
+     await db.from("lylu_bridge_messages")
+@@ -531,12 +552,42 @@
+   return reply(403, { error: "action_not_allowed" });
+ }
+ 
++// ---------------------------------------------------------------- o app do celular
++// Fala com o Hermes como a placa (send e voz entram na fila dela e a resposta vai
++// para ela), mas não busca nem confirma a fila da placa e não a marca como online.
++// A cópia da resposta o app lê com "resposta", pelos message_id que o send/voz devolveu.
++async function appAction(db: Db, deviceId: string, action: string, body: Obj, audio: Uint8Array | null, formato: string, req: Request) {
++  if (action === "resposta") {
++    const ids = Array.isArray(body.message_ids) ? body.message_ids.filter(isUuid).slice(0, 20) : [];
++    if (!ids.length) return reply(400, { error: "invalid_message_ids" });
++    const [pedidos, respostas] = await Promise.all([
++      db.from("lylu_bridge_messages").select("message_id, status")
++        .eq("device_id", deviceId).eq("direction", "device_to_agent").in("message_id", ids),
++      db.from("lylu_bridge_messages").select("request_id, payload")
++        .eq("device_id", deviceId).eq("direction", "agent_to_device").in("request_id", ids),
++    ]);
++    if (pedidos.error || respostas.error) return reply(500, { error: "read_failed" });
++    const porPedido = new Map((respostas.data || []).map((r) => [r.request_id, r.payload]));
++    return reply(200, {
++      ok: true,
++      respostas: (pedidos.data || []).map((p) => ({
++        message_id: p.message_id, status: p.status, resposta: porPedido.get(p.message_id) ?? null,
++      })),
++    });
++  }
++  // Só conversa: aviso de evento é coisa da placa.
++  if (action === "send" && (body.kind ?? "chat") !== "chat") return reply(403, { error: "action_not_allowed" });
++  if (action !== "send" && action !== "voz" && action !== "audio_get") return reply(403, { error: "action_not_allowed" });
++  return await deviceAction(db, deviceId, action, body, audio, formato, req, "app");
++}
++
+ // ---------------------------------------------------------------- entrada
+ Deno.serve(async (req: Request) => {
++  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+   if (req.method === "GET") {
+     return reply(200, {
+       ok: true, service: "lylu-bridge", version: 4, stores_audio: "temporario", audio_ttl_min: 30,
+-      audio_formatos: Object.keys(FORMATOS),
++      audio_formatos: Object.keys(FORMATOS), app: true,
+     });
+   }
+   if (req.method !== "POST") return reply(405, { error: "method_not_allowed" });
+@@ -599,6 +650,11 @@
+     return await deviceAction(db, deviceId, action, body, audio, formato, req);
+   }
+ 
++  if (credential.role === "app") {
++    if (binaryAction && action !== "voz") return reply(403, { error: "action_not_allowed" });
++    return await appAction(db, credential.device_id as string, action, body, audio, formato, req);
++  }
++
+   if (credential.role === "relay") {
+     if (binaryAction && action !== "audio_up") return reply(403, { error: "action_not_allowed" });
+     return await relayAction(db, action, body, audio, req);

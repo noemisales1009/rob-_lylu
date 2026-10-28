@@ -1,0 +1,373 @@
+diff --git a/hermes-skill/lylu-placa/SKILL.md b/hermes-skill/lylu-placa/SKILL.md
+index 3e07f21..fb426ef 100644
+--- a/hermes-skill/lylu-placa/SKILL.md
++++ b/hermes-skill/lylu-placa/SKILL.md
+@@ -32,6 +32,34 @@ e `online` (se ela falou com a ponte nos últimos 2 minutos).
+ Quando a conversa vem **da própria placa**, o relay já coloca esse estado nas
+ suas instruções — não precisa chamar `estado` de novo.
+ 
++## O que ficou guardado no Supabase
++
++```
++lylu_placa.py listas
++lylu_placa.py historico --hoje
++lylu_placa.py historico --dias 7 --tipo foco_fim
++```
++
++- **`listas`**: a missão, o bônus e os recados, uma linha por item, no jeito
++  que estavam na tela da última vez (valem com a placa **desligada**). Cada
++  tarefa tem `feita` e `feita_em` (quando a Mica marcou).
++- **`historico`**: o que aconteceu, do mais novo para o mais velho, com `em`
++  (hora em UTC — no Brasil é 3 h a menos), `tipo` e `dados`. `--hoje` começa na
++  meia-noite de Brasília; `--dias N` (até 90); `--tipo` filtra; `--limite` (até 500).
++
++| tipo | quando entra |
++|---|---|
++| `tarefa_feita` / `tarefa_desfeita` | ela marcou/desmarcou na placa (`t`, `id`, `missao`, `missao_completa`) |
++| `foco_fim` | terminou um bloco de foco (`t`, `minutos`, `bloco`, `feitos_hoje`) |
++| `recado_entendi` / `recado_adiado` | tocou em "Entendi" / "Lembrar depois" (`titulo`, `id`) |
++| `conversa` | ela falou ou escreveu com você (`via`, `pergunta`, `resposta`, `humor`) |
++| `comentario` | você comentou um aviso da placa (`sobre`, `resposta`) |
++| `hermes_falou` / `hermes_estado` / `hermes_comando` | o que você mandou para a placa |
++
++Use para responder "quantos pomodoros eu fiz hoje?", "o que eu terminei
++ontem?", "o que a gente conversou de manhã?" — e para não repetir um palpite
++que você já deu hoje (olhe `hermes_falou` antes de um `falar` espontâneo).
++
+ ## Comandos
+ 
+ | O que | Comando |
+diff --git a/relay/lylu_placa.py b/relay/lylu_placa.py
+index 64943df..be99d5c 100644
+--- a/relay/lylu_placa.py
++++ b/relay/lylu_placa.py
+@@ -7,6 +7,9 @@ chega em até ~10 s, mesmo que ela não tenha perguntado nada.
+ 
+ Exemplos:
+   lylu_placa.py estado
++  lylu_placa.py listas
++  lylu_placa.py historico --hoje
++  lylu_placa.py historico --dias 7 --tipo foco_fim
+   lylu_placa.py falar "Bora beber água?" --humor cuidadora
+   lylu_placa.py tarefas --missao "Enviar orçamento" --missao "Tomar o remédio" --bonus "Lavar a louça"
+   lylu_placa.py marcar "Tomar o remédio"
+@@ -20,6 +23,7 @@ import argparse
+ import json
+ import os
+ import sys
++from datetime import datetime, timedelta, timezone
+ from pathlib import Path
+ from typing import Any
+ 
+@@ -29,6 +33,8 @@ import lylu_bridge  # noqa: E402
+ import lylu_voz  # noqa: E402
+ 
+ TELAS = ("Foco", "Tarefas", "Recados", "Semana", "Relógio", "Cantinho", "Ajustes")
++BRASILIA = timezone(timedelta(hours=-3))      # sem horário de verão desde 2019
++LEITURAS = ("estado", "listas", "historico")  # só leem; não mandam nada para a placa
+ 
+ 
+ def carrega_env(caminho: str | None) -> None:
+@@ -109,6 +115,14 @@ def main() -> None:
+     sub = ap.add_subparsers(dest="comando", required=True)
+ 
+     sub.add_parser("estado", help="mostra o que está na placa agora (JSON)")
++    sub.add_parser("listas", help="missão, bônus e recados guardados no Supabase (valem com a placa desligada)")
++
++    s = sub.add_parser("historico", help="o que aconteceu: tarefas feitas, focos, recados, conversas (mais novo primeiro)")
++    s.add_argument("--hoje", action="store_true", help="desde a meia-noite de hoje (Brasília)")
++    s.add_argument("--dias", type=int, default=1, help="quantos dias para trás (padrão 1, até 90)")
++    s.add_argument("--tipo", help="só um tipo: tarefa_feita, tarefa_desfeita, foco_fim, recado_entendi, "
++                                  "recado_adiado, conversa, comentario, hermes_falou, hermes_estado, hermes_comando")
++    s.add_argument("--limite", type=int, default=200, help="no máximo quantos (padrão 200, até 500)")
+ 
+     s = sub.add_parser("falar", help="a Lylu fala na placa (balão + voz)")
+     s.add_argument("texto")
+@@ -163,9 +177,19 @@ def main() -> None:
+     carrega_env(args.env)
+     settings = lylu_bridge.Settings.from_env(precisa_hermes=False)
+ 
+-    if args.comando == "estado":
+-        resp = lylu_bridge.bridge_call(settings, "state", device_id=args.placa)
+-        print(json.dumps(resp.get("device"), ensure_ascii=False, indent=2))
++    if args.comando in LEITURAS:
++        if args.comando == "estado":
++            resp = lylu_bridge.bridge_call(settings, "state", device_id=args.placa).get("device")
++        elif args.comando == "listas":
++            resp = lylu_bridge.bridge_call(settings, "listas", device_id=args.placa)
++        else:
++            extra: dict[str, Any] = {"dias": args.dias, "limite": args.limite}
++            if args.hoje:
++                extra["desde"] = datetime.now(BRASILIA).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
++            if args.tipo:
++                extra["tipo"] = args.tipo
++            resp = lylu_bridge.bridge_call(settings, "historico", device_id=args.placa, **extra)
++        print(json.dumps(resp, ensure_ascii=False, indent=2))
+         return
+ 
+     kind, payload = monta(args)
+diff --git a/supabase/functions/lylu-bridge/index.ts b/supabase/functions/lylu-bridge/index.ts
+index d1b5673..8a27d29 100644
+--- a/supabase/functions/lylu-bridge/index.ts
++++ b/supabase/functions/lylu-bridge/index.ts
+@@ -11,6 +11,10 @@
+ //     tarefas, humor, comandos do pomodoro).
+ //   - claim com espera: o relay pode esperar até 25 s por uma mensagem, em vez
+ //     de chamar a função a cada 2 s (isso estourava a cota de invocações).
++// A v4 guarda o que acontece (lylu_historico: avisos da placa, conversas e o que
++// o Hermes mandou) e espelha as listas da tela em lylu_tarefas e lylu_recados,
++// que continuam valendo com a placa desligada. O relay lê com "historico" e
++// "listas". Precisa do SQL 20261028150000_historico_e_listas.sql.
+ //
+ // Implantar SEM verificação de JWT (a placa não manda Authorization):
+ //   supabase functions deploy lylu-bridge --no-verify-jwt
+@@ -125,6 +129,98 @@ async function deviceState(db: Db, deviceId: string): Promise<Obj | null> {
+   return { ...data, online: Date.now() - visto < ONLINE_MS };
+ }
+ 
++// ---------------------------------------------------------------- histórico e listas
++// Anotar nunca derruba a ação principal: se a tabela ainda não existe (função nova
++// com o SQL velho) ou o banco piscou, a conversa segue e só o registro se perde.
++async function registra(db: Db, deviceId: string, tipo: string, dados: Obj): Promise<void> {
++  try {
++    const { error } = await db.from("lylu_historico").insert({ device_id: deviceId, tipo: tipo.slice(0, 40), dados });
++    if (error) console.warn("lylu_historico:", error.message);
++  } catch (e) {
++    console.warn("lylu_historico:", e);
++  }
++}
++
++function limpo(v: unknown, max: number): string | null {
++  return typeof v === "string" && v.trim() ? v.trim().slice(0, max) : null;
++}
++
++// Grava as linhas do retrato e tira as que não vieram nele (as que ficaram com
++// atualizado_em antigo). Se a gravação falhar, não apaga nada.
++async function acertaTabela(db: Db, tabela: string, deviceId: string, linhas: Obj[], agora: string): Promise<void> {
++  if (linhas.length) {
++    const { error } = await db.from(tabela).upsert(linhas, { onConflict: "device_id,chave" });
++    if (error) {
++      console.warn(`${tabela}:`, error.message);
++      return;
++    }
++  }
++  const { error } = await db.from(tabela).delete().eq("device_id", deviceId).lt("atualizado_em", agora);
++  if (error) console.warn(`${tabela}:`, error.message);
++}
++
++// As listas do retrato viram linhas. A chave é o id (do Todoist) quando tem,
++// senão o texto. As de exemplo (a placa avisa em "aviso") não entram.
++async function espelhaListas(db: Db, deviceId: string, estado: Obj): Promise<void> {
++  const agora = new Date().toISOString();
++  const aviso = typeof estado.aviso === "string" ? estado.aviso : "";
++  if (Array.isArray(estado.missao) && Array.isArray(estado.bonus) && !aviso.includes("tarefas")) {
++    const { data: antes } = await db.from("lylu_tarefas").select("chave, feita, feita_em").eq("device_id", deviceId);
++    const velhas = new Map((antes || []).map((r) => [r.chave as string, r]));
++    const linhas = new Map<string, Obj>();
++    for (const lista of ["missao", "bonus"] as const) {
++      (estado[lista] as unknown[]).forEach((t, ordem) => {
++        const texto = isObj(t) ? limpo(t.t, 200) : null;
++        if (!isObj(t) || !texto) return;
++        const id = limpo(t.id, 64);
++        const chave = id ? `id:${id}` : `t:${texto}`;
++        if (linhas.has(chave)) return;
++        const feita = t.f === true;
++        const velha = velhas.get(chave);
++        linhas.set(chave, {
++          device_id: deviceId, chave, lista, ordem, texto, todoist_id: id, feita,
++          feita_em: feita ? (velha?.feita && velha.feita_em ? velha.feita_em : agora) : null,
++          atualizado_em: agora,
++        });
++      });
++    }
++    await acertaTabela(db, "lylu_tarefas", deviceId, [...linhas.values()], agora);
++  }
++  if (Array.isArray(estado.recados) && !aviso.includes("recados")) {
++    const linhas = new Map<string, Obj>();
++    (estado.recados as unknown[]).forEach((r, ordem) => {
++      const titulo = isObj(r) ? limpo(r.titulo, 200) : null;
++      if (!isObj(r) || !titulo) return;
++      const id = limpo(r.id, 64);
++      const quando = limpo(r.quando, 32);
++      const dia = limpo(r.dia, 40);
++      const chave = id ? `id:${id}` : `t:${titulo}|${quando ?? dia ?? ""}`;
++      if (linhas.has(chave)) return;
++      linhas.set(chave, {
++        device_id: deviceId, chave, ordem, recado_id: id, titulo, quando, dia,
++        hora: limpo(r.hora, 8), detalhe: limpo(r.detalhe, 400), visto: r.visto === true, atualizado_em: agora,
++      });
++    });
++    await acertaTabela(db, "lylu_recados", deviceId, [...linhas.values()], agora);
++  }
++}
++
++async function leListas(db: Db, deviceId: string): Promise<Obj | null> {
++  const [t, r] = await Promise.all([
++    db.from("lylu_tarefas").select("lista, ordem, texto, todoist_id, feita, feita_em, atualizado_em")
++      .eq("device_id", deviceId).order("ordem", { ascending: true }),
++    db.from("lylu_recados").select("ordem, recado_id, titulo, quando, dia, hora, detalhe, visto, atualizado_em")
++      .eq("device_id", deviceId).order("ordem", { ascending: true }),
++  ]);
++  if (t.error || r.error) return null;
++  const tarefas = t.data || [];
++  return {
++    missao: tarefas.filter((x) => x.lista === "missao"),
++    bonus: tarefas.filter((x) => x.lista === "bonus"),
++    recados: r.data || [],
++  };
++}
++
+ // ---------------------------------------------------------------- fila
+ async function claimOne(db: Db): Promise<Obj | null> {
+   const { data: rows, error } = await db.from("lylu_bridge_messages")
+@@ -184,6 +280,7 @@ async function deviceAction(db: Db, deviceId: string, action: string, body: Obj,
+       .update({ estado, estado_em: new Date().toISOString() })
+       .eq("device_id", deviceId);
+     if (error) return reply(500, { error: "report_failed" });
++    await espelhaListas(db, deviceId, estado).catch((e) => console.warn("listas:", e));
+     return reply(200, { ok: true });
+   }
+ 
+@@ -203,6 +300,10 @@ async function deviceAction(db: Db, deviceId: string, action: string, body: Obj,
+       status: "pending",
+     }).select("message_id").single();
+     if (error) return reply(500, { error: "enqueue_failed" });
++    if (kind === "event") {
++      const { tipo, ...dados } = payload;
++      await registra(db, deviceId, typeof tipo === "string" && tipo ? tipo : "evento", dados);
++    }
+     return reply(202, { ok: true, message_id: data.message_id });
+   }
+ 
+@@ -343,6 +444,14 @@ async function relayAction(db: Db, action: string, body: Obj, audio: Uint8Array
+       if (typeof body.transcricao === "string") payload.transcricao = body.transcricao.slice(0, 500);
+       const { error: insertError } = await enqueueToDevice(db, request.device_id as string, "chat", payload, requestId);
+       if (insertError) return reply(500, { error: "response_enqueue_failed" });
++      const pedido = isObj(request.payload) ? request.payload : {};
++      if (request.kind === "event") {
++        await registra(db, request.device_id as string, "comentario", { sobre: pedido.tipo ?? null, resposta: text });
++      } else {
++        const pergunta = request.kind === "voz" ? payload.transcricao ?? null : pedido.text ?? null;
++        await registra(db, request.device_id as string, "conversa",
++          { via: request.kind, pergunta, resposta: text, humor: payload.humor ?? null });
++      }
+     }
+     await db.from("lylu_bridge_messages")
+       .update({ status: "completed", completed_at: new Date().toISOString() })
+@@ -375,6 +484,8 @@ async function relayAction(db: Db, action: string, body: Obj, audio: Uint8Array
+     if (!deviceId) return reply(404, { error: "device_not_found" });
+     const { data, error } = await enqueueToDevice(db, deviceId, kind, payload, null);
+     if (error) return reply(500, { error: "enqueue_failed" });
++    const { audio_id: _a, formato: _f, ...dados } = payload;
++    await registra(db, deviceId, kind === "chat" ? "hermes_falou" : `hermes_${kind}`, dados);
+     return reply(202, { ok: true, message_id: data.message_id, device_id: deviceId });
+   }
+ 
+@@ -384,6 +495,39 @@ async function relayAction(db: Db, action: string, body: Obj, audio: Uint8Array
+     return reply(200, { ok: true, device: await deviceState(db, deviceId) });
+   }
+ 
++  // O que aconteceu na placa, do mais novo para o mais velho. "desde" (ISO)
++  // ganha de "dias"; "tipo" filtra (tarefa_feita, foco_fim, conversa...).
++  if (action === "historico") {
++    const deviceId = await resolveDevice(db, body.device_id);
++    if (!deviceId) return reply(404, { error: "device_not_found" });
++    const dias = Math.max(1, Math.min(90, Number(body.dias) || 1));
++    const pedido = typeof body.desde === "string" ? Date.parse(body.desde) : NaN;
++    const desde = new Date(Number.isNaN(pedido) ? Date.now() - dias * 86_400_000 : pedido).toISOString();
++    const limite = Math.max(1, Math.min(500, Number(body.limite) || 200));
++    let q = db.from("lylu_historico").select("em, tipo, dados")
++      .eq("device_id", deviceId).gte("em", desde).order("em", { ascending: false }).limit(limite);
++    if (typeof body.tipo === "string" && body.tipo) q = q.eq("tipo", body.tipo);
++    const { data, error } = await q;
++    if (error) return reply(500, { error: "historico_failed" });
++    return reply(200, { ok: true, device_id: deviceId, desde, itens: data || [] });
++  }
++
++  // As listas guardadas, que valem com a placa desligada. Logo depois de instalar
++  // a v4 elas ainda estão vazias: aí saem do último retrato da placa.
++  if (action === "listas") {
++    const deviceId = await resolveDevice(db, body.device_id);
++    if (!deviceId) return reply(404, { error: "device_not_found" });
++    let listas = await leListas(db, deviceId);
++    if (!listas) return reply(500, { error: "listas_failed" });
++    const vazias = [listas.missao, listas.bonus, listas.recados].every((l) => !(l as unknown[]).length);
++    const estado = vazias ? (await deviceState(db, deviceId))?.estado : null;
++    if (isObj(estado)) {
++      await espelhaListas(db, deviceId, estado).catch((e) => console.warn("listas:", e));
++      listas = await leListas(db, deviceId) ?? listas;
++    }
++    return reply(200, { ok: true, device_id: deviceId, ...listas });
++  }
++
+   return reply(403, { error: "action_not_allowed" });
+ }
+ 
+@@ -391,7 +535,7 @@ async function relayAction(db: Db, action: string, body: Obj, audio: Uint8Array
+ Deno.serve(async (req: Request) => {
+   if (req.method === "GET") {
+     return reply(200, {
+-      ok: true, service: "lylu-bridge", version: 3, stores_audio: "temporario", audio_ttl_min: 30,
++      ok: true, service: "lylu-bridge", version: 4, stores_audio: "temporario", audio_ttl_min: 30,
+       audio_formatos: Object.keys(FORMATOS),
+     });
+   }
+diff --git a/supabase/migrations/20261028150000_historico_e_listas.sql b/supabase/migrations/20261028150000_historico_e_listas.sql
+new file mode 100644
+index 0000000..ff0b837
+--- /dev/null
++++ b/supabase/migrations/20261028150000_historico_e_listas.sql
+@@ -0,0 +1,53 @@
++-- Ponte Lylu v4: o que aconteceu (histórico) e as listas da placa em tabelas.
++-- Pode rodar mais de uma vez sem estragar nada.
++
++-- 1) Histórico: cada coisa que aconteceu, com dia e hora. Quem escreve é só a
++--    Edge Function: os avisos da placa (tarefa feita, foco terminado, recado
++--    visto...), as conversas (o que a Mica disse e o que o Hermes respondeu) e
++--    o que o Hermes mandou para a placa.
++create table if not exists public.lylu_historico (
++  id bigint generated always as identity primary key,
++  device_id text not null,
++  em timestamptz not null default now(),
++  tipo text not null,
++  dados jsonb not null default '{}'::jsonb
++);
++create index if not exists lylu_historico_device_em on public.lylu_historico (device_id, em desc);
++create index if not exists lylu_historico_device_tipo_em on public.lylu_historico (device_id, tipo, em desc);
++
++-- 2) As listas que estão na placa, uma linha por item. Quem manda é a placa: a
++--    cada retrato (report) a função acerta estas tabelas pelo que está na tela.
++--    Assim elas continuam valendo com a placa desligada. feita_em é quando a
++--    tarefa foi marcada (o retrato chega ~2 s depois do toque).
++create table if not exists public.lylu_tarefas (
++  device_id text not null,
++  chave text not null,                 -- "id:<todoist>" ou "t:<texto>"
++  lista text not null check (lista in ('missao', 'bonus')),
++  ordem int not null default 0,
++  texto text not null,
++  todoist_id text,
++  feita boolean not null default false,
++  feita_em timestamptz,
++  atualizado_em timestamptz not null default now(),
++  primary key (device_id, chave)
++);
++
++create table if not exists public.lylu_recados (
++  device_id text not null,
++  chave text not null,                 -- "id:<id>" ou "t:<título>|<quando>"
++  ordem int not null default 0,
++  recado_id text,
++  titulo text not null,
++  quando text,                         -- AAAA-MM-DD ou AAAA-MM-DDTHH:MM, como o Hermes mandou
++  dia text,
++  hora text,
++  detalhe text,
++  visto boolean not null default false,
++  atualizado_em timestamptz not null default now(),
++  primary key (device_id, chave)
++);
++
++-- 3) Só a Edge Function (service_role) enxerga: RLS ligado e nenhuma política.
++alter table public.lylu_historico enable row level security;
++alter table public.lylu_tarefas enable row level security;
++alter table public.lylu_recados enable row level security;

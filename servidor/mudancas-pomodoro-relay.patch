@@ -1,0 +1,42 @@
+diff --git a/relay/lylu_bridge.py b/relay/lylu_bridge.py
+index 9930f6e..ac104ba 100644
+--- a/relay/lylu_bridge.py
++++ b/relay/lylu_bridge.py
+@@ -251,10 +251,34 @@ def describe_event(payload: dict[str, Any]) -> str:
+         return texto + " Se essa tarefa vier do Todoist, conclua lá também."
+     if tipo == "tarefa_desfeita":
+         return f"Mica desmarcou, na placa: “{t}”{ident}. Se você tinha concluído no Todoist, reabra."
++    # O pomodoro: ela pediu para você saber quando está em foco e avisar a pausa
++    # (e de quantos minutos ela é). Nesses dois avisos falar não é palpite, é função.
++    blocos = f" de {payload['blocos']}" if payload.get("blocos") else ""
++    if tipo == "foco_inicio":
++        return (f"Mica começou um bloco de foco de {payload.get('minutos', '?')} min em “{t}” "
++                f"(bloco {payload.get('bloco', '?')}{blocos}). Ela está em pomodoro agora: não puxe "
++                "conversa nem mande falas até a pausa. Responda exatamente SILENCIO.")
+     if tipo == "foco_fim":
+-        return (f"Mica terminou um bloco de foco de {payload.get('minutos', '?')} min em “{t}” "
+-                f"(bloco {payload.get('bloco', '?')}; {payload.get('feitos_hoje', '?')} concluídos hoje). "
+-                "Agora começa a pausa.")
++        texto = (f"Mica terminou um bloco de foco de {payload.get('minutos', '?')} min em “{t}” "
++                 f"(bloco {payload.get('bloco', '?')}{blocos}; {payload.get('feitos_hoje', '?')} concluídos hoje).")
++        if not payload.get("pausa_min"):
++            return texto + " Agora começa a pausa."
++        longa = "a pausa longa, o ciclo inteiro acabou" if payload.get("pausa_longa") else "uma pausa curta"
++        comeca = ("o relógio da pausa já está correndo" if payload.get("pausa_sozinha")
++                  else "ela toca em “Começar pausa” quando quiser")
++        return (texto + f" Agora é {longa}: {payload['pausa_min']} minutos ({comeca}). AVISE a Mica, em uma "
++                "frase curta e acolhedora, que é hora da pausa e de quantos minutos ela é — por exemplo "
++                f"“Hora da pausa: {payload['pausa_min']} minutinhos. Levanta e bebe uma água.”. "
++                "Aqui não responda SILENCIO.")
++    if tipo == "pausa_fim":
++        proximo = f"bloco {payload.get('proximo_bloco', '?')}{blocos}, de {payload.get('foco_min', '?')} min"
++        if payload.get("pulou"):
++            return f"Mica pulou a pausa e voltou para o foco ({proximo}). Responda exatamente SILENCIO."
++        volta = ("o foco já recomeçou sozinho" if payload.get("foco_sozinho")
++                 else "ela toca em “Começar” quando estiver pronta")
++        return (f"A pausa de {payload.get('minutos', '?')} minutos da Mica acabou; agora vem o {proximo} "
++                f"em “{t}” ({volta}). AVISE em uma frase curta e gentil que a pausa acabou, sem cobrar. "
++                "Aqui não responda SILENCIO.")
+     if tipo == "recado_entendi":
+         return f"Mica tocou em “Entendi” no recado “{payload.get('titulo', '')}”{ident}."
+     if tipo == "recado_adiado":

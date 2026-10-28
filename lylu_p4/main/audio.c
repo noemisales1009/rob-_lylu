@@ -8,8 +8,10 @@
 #include "driver/i2s_std.h"
 #include "esp_codec_dev.h"
 #include "esp_codec_dev_defaults.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "placa.h"
@@ -42,7 +44,18 @@ static int64_t agora_ms(void) { return esp_timer_get_time() / 1000; }
 static esp_codec_dev_handle_t ouvido;   // entrada e saída: o mesmo ES8311 faz as duas
 static int nivel;
 static bool ligado;
-static TaskHandle_t voz;
+
+// A gravação da fala: a tarefa que escuta copia cada quadro para cá enquanto
+// "gravando" estiver ligado. A trava protege a troca do buffer entre ela e a tela.
+// O limiar é um chute de partida (fica entre o "ouvi alguma coisa" do log, 2000,
+// e o silêncio): o log de cada gravação mostra o pico, para acertar com a voz real.
+#define LIMIAR_FALA 1200
+static int grav_pico;
+static portMUX_TYPE grav_trava = portMUX_INITIALIZER_UNLOCKED;
+static int16_t *grav;
+static size_t grav_n, grav_max;
+static volatile bool gravando, ouviu;
+static volatile int64_t grav_inicio, ultima_fala;
 
 // ---------------------------------------------------------------- o barramento de som
 static bool monta_i2s(i2s_chan_handle_t *tx, i2s_chan_handle_t *rx)
@@ -81,6 +94,20 @@ static void escuta(void *p)
         for (int i = 0; i < amostras; i++) soma += (int32_t)buf[i] * buf[i];
         int rms = (int)sqrt((double)soma / amostras);
 
+        if (gravando) {
+            portENTER_CRITICAL(&grav_trava);
+            if (gravando && grav) {
+                size_t cabe = grav_max - grav_n, n = (size_t)amostras < cabe ? (size_t)amostras : cabe;
+                memcpy(grav + grav_n, buf, n * sizeof *buf);
+                grav_n += n;
+                if (grav_n >= grav_max) gravando = false;      // chegou no teto: para sozinha
+            }
+            portEXIT_CRITICAL(&grav_trava);
+            if (rms > grav_pico) grav_pico = rms;
+            // Os primeiros 300 ms não contam como fala: é o toque do dedo no "Falar".
+            if (rms > LIMIAR_FALA && agora_ms() - grav_inicio > 300) { ouviu = true; ultima_fala = agora_ms(); }
+        }
+
         // 8000 de RMS já é voz alta a um palmo. O que passar disso satura em 100.
         int agora = rms / 80;
         if (agora > 100) agora = 100;
@@ -112,23 +139,111 @@ static void nota(int16_t *buf, int n, float freq)
     }
 }
 
-static void fala(void *p)
+// Tudo o que sai no alto-falante passa por esta fila, um de cada vez: o blip
+// (pcm NULL) e a voz que veio do Hermes. A voz vai em pedaços de 50 ms para dar
+// pra cortar no meio (audio_calar) sem esperar a frase inteira acabar.
+typedef struct { int16_t *pcm; size_t n; } som_t;
+static QueueHandle_t fila_som;
+static volatile bool calar, falando;
+#define PEDACO (TAXA / 20)
+
+static void blip(int16_t *buf, int n, int pausa)
 {
     static const float NOTAS[3] = { 523.25f, 659.25f, 783.99f };
+    for (int k = 0; k < 3; k++) {
+        nota(buf, n, NOTAS[k]);
+        memset(buf + n, 0, pausa * sizeof *buf);
+        esp_codec_dev_write(ouvido, buf, (n + pausa) * sizeof *buf);
+    }
+}
+
+static void fala(void *p)
+{
     const int n = TAXA * 120 / 1000, pausa = TAXA * 30 / 1000;    // 120 ms cada, 30 ms entre
     int16_t *buf = calloc(n + pausa, sizeof *buf);
     if (!buf) { vTaskDelete(NULL); return; }
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        for (int k = 0; k < 3; k++) {
-            nota(buf, n, NOTAS[k]);
-            memset(buf + n, 0, pausa * sizeof *buf);
-            esp_codec_dev_write(ouvido, buf, (n + pausa) * sizeof *buf);
+        som_t s;
+        if (xQueueReceive(fila_som, &s, portMAX_DELAY) != pdTRUE) continue;
+        if (!s.pcm) { blip(buf, n, pausa); continue; }
+        calar = false;
+        falando = true;
+        for (size_t i = 0; i < s.n && !calar; i += PEDACO) {
+            size_t k = s.n - i < PEDACO ? s.n - i : PEDACO;
+            esp_codec_dev_write(ouvido, s.pcm + i, k * sizeof *s.pcm);
         }
+        free(s.pcm);
+        falando = uxQueueMessagesWaiting(fila_som) > 0;
     }
 }
 
-void audio_blip(void) { if (voz) xTaskNotifyGive(voz); }
+void audio_blip(void)
+{
+    som_t s = { 0 };
+    if (fila_som) xQueueSend(fila_som, &s, 0);
+}
+
+void audio_tocar(int16_t *pcm, size_t amostras)
+{
+    som_t s = { pcm, amostras };
+    if (!pcm) return;
+    if (!fila_som || !amostras || xQueueSend(fila_som, &s, 0) != pdTRUE) { free(pcm); return; }
+    falando = true;
+}
+
+void audio_calar(void)
+{
+    som_t s;
+    while (fila_som && xQueueReceive(fila_som, &s, 0) == pdTRUE) free(s.pcm);
+    calar = true;
+}
+
+bool audio_falando(void) { return falando; }
+
+// ---------------------------------------------------------------- gravando
+bool audio_gravar(int max_ms)
+{
+    if (!ligado || max_ms <= 0) return false;
+    size_t max = (size_t)TAXA * max_ms / 1000;
+    int16_t *novo = heap_caps_malloc(max * sizeof *novo, MALLOC_CAP_SPIRAM);
+    if (!novo) return false;
+    portENTER_CRITICAL(&grav_trava);
+    int16_t *velho = grav;
+    grav = novo;
+    grav_n = 0;
+    grav_max = max;
+    ouviu = false;
+    grav_pico = 0;
+    grav_inicio = ultima_fala = agora_ms();
+    gravando = true;
+    portEXIT_CRITICAL(&grav_trava);
+    free(velho);
+    return true;
+}
+
+void audio_parar_gravacao(void)
+{
+    if (!gravando) return;
+    gravando = false;
+    ESP_LOGI(TAG, "gravei %d ms, pico de RMS %d (limiar %d)", audio_gravado_ms(), grav_pico, LIMIAR_FALA);
+}
+
+bool audio_gravando(void) { return gravando; }
+int audio_gravado_ms(void) { return (int)(grav_n * 1000 / TAXA); }
+bool audio_ouviu_fala(void) { return ouviu; }
+int audio_silencio_ms(void) { return (int)(agora_ms() - ultima_fala); }
+
+int16_t *audio_pega_gravacao(size_t *amostras)
+{
+    portENTER_CRITICAL(&grav_trava);
+    gravando = false;
+    int16_t *b = grav;
+    *amostras = grav_n;
+    grav = NULL;
+    grav_n = grav_max = 0;
+    portEXIT_CRITICAL(&grav_trava);
+    return b;
+}
 
 // ---------------------------------------------------------------- começo
 void audio_iniciar(void)
@@ -174,8 +289,9 @@ void audio_iniciar(void)
     esp_codec_dev_set_out_vol(ouvido, VOLUME);
 
     ligado = true;
+    fila_som = xQueueCreate(4, sizeof(som_t));
     xTaskCreate(escuta, "escuta", 4096, NULL, 4, NULL);
-    xTaskCreate(fala, "fala", 4096, NULL, 4, &voz);
+    xTaskCreate(fala, "fala", 4096, NULL, 4, NULL);
     ESP_LOGI(TAG, "microfone de pé — fala alguma coisa");
     audio_blip();                // o alto-falante (no conector da borda, abaixo do cartão SD) dá oi
 }

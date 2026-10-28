@@ -1,10 +1,13 @@
 // Lylu na Guition ESP32-P4 de 7" — as seis telas do protótipo (docs/telas-da-lylu.md).
-// As tarefas ainda são de exemplo; o Supabase vem depois. O Wi-Fi já é de verdade,
-// e se configura na própria tela (ver rede.c e a seção WI-FI aqui embaixo).
+// Tarefas, recados, fala e humor vêm do Hermes pela ponte (ver HERMES e CONVERSA
+// aqui embaixo; o lado do servidor está em servidor/). O Wi-Fi se configura na
+// própria tela (ver rede.c e a seção WI-FI).
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <time.h>
 #include "esp_heap_caps.h"
@@ -12,11 +15,14 @@
 #include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "cJSON.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "lvgl.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "gif/lv_gif_private.h"   // copia corrigida do GIF da LVGL (ver gif/gifdec.c)
+#include "adpcm.h"
 #include "audio.h"
 #include "placa.h"
 #include "ponte.h"
@@ -47,6 +53,8 @@ static const char *TAG = "lylu";
 EMB(lylu_pomodoro_gif) EMB(lylu_tarefas_gif) EMB(lylu_recados_gif) EMB(lylu_semana_gif)
 EMB(lylu_relogio_gif) EMB(lylu_quarto_gif) EMB(lylu_ajustes_gif)
 EMB(corpo_ttf) EMB(corpo_negrito_ttf) EMB(pixel_ttf)
+// Os avisos do pomodoro na voz da Francisca, feitos pelo Hermes (28/10/2026).
+EMB(pausa_5min_adpcm) EMB(pausa_20min_adpcm) EMB(pausa_fim_adpcm)
 
 typedef enum {
     A_POMODORO,   // sentada com o notebook
@@ -99,38 +107,62 @@ static void carrega_fontes(void)
 }
 
 // ---------------------------------------------------------------- estado
-typedef struct { const char *t; bool f; } tarefa_t;
+// A missão e o bônus vêm do Hermes (ver HERMES) e ficam guardados na NVS. Até ele
+// mandar, ficam vazios: nada de tarefa de mentira na mesa dela. O id é o do
+// Todoist, quando ele manda: é como o Hermes sabe qual tarefa concluir lá.
+//
+// As listas moram na PSRAM. Como variáveis estáticas, elas e os recados somavam
+// 11 KB a mais na RAM interna — justo o pedaço onde o sistema monta as primeiras
+// tarefas antes do app_main — e a placa reiniciava em loop antes de abrir a tela
+// ("assert failed: vApplicationGetIdleTaskMemory ... pxStackBufferTemp != NULL").
+#define MAX_MISSAO 3
+#define MAX_BONUS  6
+typedef struct { char id[40]; char t[96]; bool f; } tarefa_t;
 
-static tarefa_t missao[] = { { "Enviar orçamento pro cliente", false }, { "Tomar o remédio", true } };
-static tarefa_t bonus[]  = { { "Responder os e-mails", true }, { "Organizar a mesa", false },
-                             { "Ler o capítulo 3", false }, { "Lavar a louça", false } };
-#define N_MISSAO (sizeof(missao) / sizeof(missao[0]))
-#define N_BONUS  (sizeof(bonus) / sizeof(bonus[0]))
+static tarefa_t *missao, *bonus;
+static int n_m, n_b;
 
-static bool dificil = false, cortada = false;
+static bool dificil = false, cortada = false, silencio_foco = true;
 static int64_t carinho_ate = 0;
+static const char *ligou_por = "?";     // o motivo do último reinício (ver app_main)
+
+// O que o Hermes disse por último fica no balão da tela à vista por um tempo,
+// por cima da fala de sempre daquela tela (ver balao_fala e HERMES).
+#define FALA_MAX 280                 // o balão não comporta mais que isso
+static char h_fala[FALA_MAX + 4], h_forte[204];
+static int64_t h_fala_ate;
+static char h_humor[24];
+static int64_t h_humor_ate;
+static lv_obj_t *balao_da_vez(void);
+static void relatar(void);
+static void avisa_hermes(cJSON *ev);
+static void avisa_hermes_em(cJSON *ev, int resposta_em_ms);
+static void lylu_fala(const char *texto, const char *forte, int16_t *audio, size_t amostras);
+static void guarda_hermes(void);
 
 // O pomodoro da tela da frente anda em quatro passos (ver POMODORO).
 typedef enum { P_ESCOLHER, P_CONFIGURAR, P_FOCO, P_PAUSA } passo_t;
 static passo_t passo = P_ESCOLHER;
 typedef struct { uint8_t foco, curta, blocos, longa, sozinha; } pomo_t;   // minutos; "avançar sozinha"
 static pomo_t pomo = { 25, 5, 4, 20, 1 };
-static char tarefa_atual[64] = "O que você quiser";
-static struct { bool rodando; int resto, bloco, feitos; } foco = { false, 25 * 60, 1, 0 };
+static char tarefa_atual[96] = "O que você quiser";
+// total: o tamanho deste bloco. É o tempo guardado, menos quando o Hermes pede
+// um foco de outro tamanho só desta vez.
+static struct { bool rodando; int resto, total, bloco, feitos; } foco = { false, 25 * 60, 25 * 60, 1, 0 };
 static struct { bool rodando, longa; int resto, cuidado; } pausa = { false, false, 5 * 60, -1 };
 
 enum { T_FOCO, T_TAREFAS, T_RECADOS, T_SEMANA, T_RELOGIO, T_CASA, T_AJUSTES, N_TELAS };   // a ordem do modelo
 static int tela_atual = T_FOCO;
 
 static int64_t agora_ms(void) { return esp_timer_get_time() / 1000; }
-static int n_missao(void) { return cortada ? 1 : (int)N_MISSAO; }
+static int n_missao(void) { return cortada && n_m > 1 ? 1 : n_m; }
 static int missao_feita(void)
 {
     int n = 0;
     for (int i = 0; i < n_missao(); i++) n += missao[i].f;
     return n;
 }
-static bool missao_completa(void) { return missao_feita() == n_missao(); }
+static bool missao_completa(void) { return n_missao() && missao_feita() == n_missao(); }
 
 // ---------------------------------------------------------------- objetos
 static lv_obj_t *tv, *tiles[N_TELAS], *pontos[N_TELAS], *caixa_pontos;
@@ -204,6 +236,9 @@ static lv_obj_t *balao(lv_obj_t *pai, int x, int y, int largura)
 
 static void balao_fala(lv_obj_t *b, const char *s, const char *forte)
 {
+    // Enquanto vale a fala do Hermes, ela ocupa o balão da tela à vista; as
+    // outras telas seguem com a fala de sempre e voltam a ela quando ele cala.
+    if (h_fala_ate > agora_ms() && b == balao_da_vez()) { s = h_fala; forte = h_forte; }
     if (!s || !*s) { lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN); return; }
     lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(lv_obj_get_child(b, 0), s);
@@ -425,9 +460,29 @@ static void lylu_mostra(anim_t a)
     lv_anim_start(&an);
 }
 
+// Na aba Foco ela sai de cena (pedido da Mica: ali é só o trabalho e o relógio).
+// lylu_em a traz de volta na próxima tela em que ela aparece.
+static bool lylu_fora;
+
+static void lylu_esconde(void)
+{
+    if (lylu_fora) return;
+    lylu_fora = true;
+    lv_anim_delete(lylu, opacidade);
+    lv_obj_set_style_image_opa(lylu, LV_OPA_COVER, 0);
+    guarda_a_que_saiu();
+    lv_obj_add_flag(lylu, LV_OBJ_FLAG_HIDDEN);
+    lv_gif_pause(lylu);
+}
+
 // As duas andam sempre juntas: na hora da troca, a que entra já está no lugar certo.
 static void lylu_em(lv_obj_t *pai, int x, int y)
 {
+    if (lylu_fora) {
+        lylu_fora = false;
+        lv_obj_remove_flag(lylu, LV_OBJ_FLAG_HIDDEN);
+        lv_gif_resume(lylu);
+    }
     for (int i = 0; i < 2; i++) {
         lv_obj_t *g = i ? lylu_outra : lylu;
         if (lv_obj_get_parent(g) != pai) lv_obj_set_parent(g, pai);
@@ -451,6 +506,8 @@ static void ev_carinho(lv_event_t *e)
 }
 
 // ---------------------------------------------------------------- barra de status
+static void ev_falar(lv_event_t *e);   // ver CONVERSA
+
 static void cria_status(void)
 {
     lv_obj_t *bar = caixa(lv_layer_top());
@@ -486,6 +543,18 @@ static void cria_status(void)
     lv_obj_set_style_radius(st_humor_ponto, 5, 0);
     lv_obj_set_style_bg_opa(st_humor_ponto, LV_OPA_COVER, 0);
     texto(st_humor, "animada", f_corpo_p, C_TINTA);
+
+    // Falar com o Hermes de qualquer tela: fica aqui em cima, sempre à mão.
+    lv_obj_t *fl = lv_button_create(bar);
+    lv_obj_set_style_bg_color(fl, C_OLIVA, 0);
+    lv_obj_set_style_radius(fl, 99, 0);
+    lv_obj_set_style_shadow_width(fl, 0, 0);
+    lv_obj_set_style_pad_hor(fl, 16, 0);
+    lv_obj_set_style_pad_ver(fl, 5, 0);
+    lv_obj_set_ext_click_area(fl, 6);
+    lv_obj_t *l = texto(fl, "Falar", f_negrito_p, C_ESCURO);
+    lv_obj_center(l);
+    lv_obj_add_event_cb(fl, ev_falar, LV_EVENT_CLICKED, NULL);
 }
 
 // ---------------------------------------------------------------- a barra de navegação
@@ -639,14 +708,16 @@ static void atualizar_depois(void *p) { atualizar(); }
 // A tela da frente é um caminho de quatro passos: escolher a tarefa, ajustar os
 // tempos (só se quiser, pela engrenagem), focar e pausar. Cada passo é um painel
 // à esquerda; a Lylu e o balão ficam à direita e só mudam de fala.
-static lv_obj_t *painel[4], *p_balao, *p_engrenagem, *p_mesa;
+// A aba Foco não tem a Lylu nem o balão dela (pedido da Mica, 28/10/2026): é só o
+// trabalho e o relógio. O que ela dizia na pausa virou a linha pau_dica.
+static lv_obj_t *painel[4], *p_engrenagem;
 static lv_obj_t *esc_lista, *esc_campo_txt;
 static char esc_texto[64];
 static lv_obj_t *cfg_valor[4], *cfg_sozinha;
 static pomo_t pomo_editando;
 static passo_t passo_antes_cfg = P_FOCO;
 static lv_obj_t *foco_arco, *foco_num, *foco_sub, *foco_tarefa, *foco_btn_txt, *foco_parar, *foco_blocos;
-static lv_obj_t *pau_selo, *pau_num, *pau_nome, *pau_btn_txt, *pau_cuidado[3];
+static lv_obj_t *pau_selo, *pau_num, *pau_nome, *pau_btn_txt, *pau_cuidado[3], *pau_dica;
 static lv_obj_t *dg_tela, *dg_campo;
 static teclado_t dg_tc;
 
@@ -663,7 +734,7 @@ static void pomo_carrega(void)
     size_t n = sizeof p;
     if (nvs_get_blob(h, NVS_POMO, &p, &n) == ESP_OK && n == sizeof p && p.foco && p.blocos) pomo = p;
     nvs_close(h);
-    foco.resto = pomo.foco * 60;
+    foco.resto = foco.total = pomo.foco * 60;
 }
 
 static void pomo_guarda(void)
@@ -676,6 +747,96 @@ static void pomo_guarda(void)
 }
 
 // ---- de um passo pro outro ----
+// O Hermes acompanha o pomodoro pelos avisos: foco_inicio (ele fica sabendo e não
+// puxa conversa), foco_fim (ele avisa da pausa e de quantos minutos ela tem) e
+// pausa_fim (ele chama de volta; se ela pulou a pausa, não precisa).
+// Folga antes de perguntar ligeiro: o servidor leva ~1,5 s num aviso (medido pelo
+// Hermes em 28/10/2026). Com 4 s, eram 3,5 s só esperando a placa consultar.
+#define RESPOSTA_POMODORO_MS 1000
+
+// Falas guardadas. Mesmo perguntando ligeiro, a voz pela internet chegava ~4 s
+// depois do zero, e adiantar do lado do Hermes não dava certo: a placa consulta a
+// fila quando consulta. Então, quando o foco começa, ele já manda as duas falas
+// (a da pausa e a da volta) com "tocar": "foco_fim" / "pausa_fim", e a placa as
+// toca pelo próprio relógio, junto com o plim. Sem fala guardada, vale o aviso de
+// sempre: ele responde ao foco_fim.
+enum { G_FOCO_FIM, G_PAUSA_FIM, G_TOTAL };
+typedef struct { char texto[FALA_MAX + 4], forte[204]; int16_t *audio; size_t amostras; } guardada_t;
+static guardada_t guardadas[G_TOTAL];
+
+static void descarta_guardada(int i)
+{
+    free(guardadas[i].audio);
+    memset(&guardadas[i], 0, sizeof guardadas[i]);
+}
+
+static void guarda_fala(int i, const char *texto, const char *forte, int16_t *audio, size_t amostras)  // fica com o áudio
+{
+    descarta_guardada(i);
+    strlcpy(guardadas[i].texto, texto ? texto : "", sizeof guardadas[i].texto);
+    strlcpy(guardadas[i].forte, forte ? forte : "", sizeof guardadas[i].forte);
+    guardadas[i].audio = audio;
+    guardadas[i].amostras = amostras;
+}
+
+static bool toca_guardada(int i)
+{
+    guardada_t *g = &guardadas[i];
+    if (!g->texto[0]) return false;
+    lylu_fala(g->texto, g->forte, g->audio, g->amostras);       // lylu_fala fica com o áudio
+    g->audio = NULL;
+    descarta_guardada(i);
+    return true;
+}
+
+// Os avisos gravados na própria placa (main/sons/, a voz da Francisca que o Hermes
+// gerou). Os da pausa dizem os minutos, então só valem para 5 e 20 (os tempos de
+// fábrica); com outro tempo, fica o aviso pela internet.
+// 70% do volume: no zero do foco a placa apagou uma vez logo depois do plim
+// (28/10/2026, sem erro no log: cara de queda de tensão no pico do alto-falante).
+#define SOM_POMODORO_PCT 70
+
+static bool toca_som(const uint8_t *ini, const uint8_t *fim)
+{
+    if (audio_gravando()) return false;        // gravando a Conversa: entraria na gravação
+    size_t n = fim - ini;
+    int16_t *pcm = heap_caps_malloc(adpcm_amostras(n) * sizeof *pcm, MALLOC_CAP_SPIRAM);
+    if (!pcm) return false;
+    size_t amostras = adpcm_decodifica(ini, n, pcm);
+    for (size_t i = 0; i < amostras; i++) pcm[i] = (int16_t)(pcm[i] * SOM_POMODORO_PCT / 100);
+    audio_tocar(pcm, amostras);                // audio_tocar fica com o buffer
+    return true;
+}
+
+static bool toca_aviso_pausa(int minutos)
+{
+    if (minutos == 5) return toca_som(pausa_5min_adpcm_start, pausa_5min_adpcm_end);
+    if (minutos == 20) return toca_som(pausa_20min_adpcm_start, pausa_20min_adpcm_end);
+    return false;
+}
+
+static void avisa_foco_inicio(void)
+{
+    // As de um foco anterior (cancelado, ou de outro tamanho de pausa) não valem mais.
+    for (int i = 0; i < G_TOTAL; i++) descarta_guardada(i);
+    bool longa = foco.bloco >= pomo.blocos;
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "tipo", "foco_inicio");
+    cJSON_AddStringToObject(ev, "t", tarefa_atual);
+    cJSON_AddNumberToObject(ev, "minutos", foco.total / 60);
+    cJSON_AddNumberToObject(ev, "bloco", foco.bloco);
+    cJSON_AddNumberToObject(ev, "blocos", pomo.blocos);
+    // O que vem depois, para ele deixar as duas falas prontas.
+    cJSON_AddNumberToObject(ev, "pausa_min", longa ? pomo.longa : pomo.curta);
+    cJSON_AddBoolToObject(ev, "pausa_longa", longa);
+    cJSON_AddBoolToObject(ev, "pausa_sozinha", pomo.sozinha);
+    cJSON_AddNumberToObject(ev, "proximo_bloco", longa ? 1 : foco.bloco + 1);
+    cJSON_AddNumberToObject(ev, "foco_min", pomo.foco);
+    cJSON_AddBoolToObject(ev, "foco_sozinho", pomo.sozinha);
+    cJSON_AddBoolToObject(ev, "guarda_falas", true);   // esta placa toca "tocar": foco_fim/pausa_fim no zero
+    avisa_hermes(ev);
+}
+
 static void fim_do_foco(void)
 {
     foco.rodando = false;
@@ -684,16 +845,52 @@ static void fim_do_foco(void)
     pausa.resto = (pausa.longa ? pomo.longa : pomo.curta) * 60;
     pausa.rodando = pomo.sozinha;
     pausa.cuidado = -1;
+    // No zero: o plim e, em seguida, a fala que o Hermes deixou pronta ou a gravada.
+    audio_blip();
+    bool avisei = toca_guardada(G_FOCO_FIM) || toca_aviso_pausa(pausa.resto / 60);
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "tipo", "foco_fim");
+    cJSON_AddStringToObject(ev, "t", tarefa_atual);
+    cJSON_AddNumberToObject(ev, "minutos", foco.total / 60);
+    cJSON_AddNumberToObject(ev, "bloco", foco.bloco);
+    cJSON_AddNumberToObject(ev, "blocos", pomo.blocos);
+    cJSON_AddNumberToObject(ev, "feitos_hoje", foco.feitos);
+    cJSON_AddNumberToObject(ev, "pausa_min", pausa.resto / 60);
+    cJSON_AddBoolToObject(ev, "pausa_longa", pausa.longa);
+    cJSON_AddBoolToObject(ev, "pausa_sozinha", pausa.rodando);
+    cJSON_AddBoolToObject(ev, "avisei", avisei);       // já tocou a fala guardada: ele não repete
+    avisa_hermes_em(ev, avisei ? PONTE_JA_FALEI : RESPOSTA_POMODORO_MS);
     passo = P_PAUSA;
     atualizar();
 }
 
-static void fim_da_pausa(void)
+static void fim_da_pausa(bool pulou)
 {
+    int minutos = (pausa.longa ? pomo.longa : pomo.curta);
     pausa.rodando = false;
     foco.bloco = pausa.longa ? 1 : foco.bloco + 1;
-    foco.resto = pomo.foco * 60;
+    foco.resto = foco.total = pomo.foco * 60;
+    // Antes de o foco voltar a correr: com ele rodando e o silêncio do foco ligado,
+    // lylu_fala só mostraria o balão.
+    bool avisei = false;
+    if (!pulou) {
+        audio_blip();                          // a pausa acabou sozinha: o plim, no zero
+        avisei = toca_guardada(G_PAUSA_FIM) || toca_som(pausa_fim_adpcm_start, pausa_fim_adpcm_end);
+    }
+    descarta_guardada(G_PAUSA_FIM);            // pulou: a fala da volta não faz mais sentido
     foco.rodando = pomo.sozinha;
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "tipo", "pausa_fim");
+    cJSON_AddStringToObject(ev, "t", tarefa_atual);
+    cJSON_AddNumberToObject(ev, "minutos", minutos);
+    cJSON_AddBoolToObject(ev, "pulou", pulou);
+    cJSON_AddNumberToObject(ev, "proximo_bloco", foco.bloco);
+    cJSON_AddNumberToObject(ev, "blocos", pomo.blocos);
+    cJSON_AddNumberToObject(ev, "foco_min", pomo.foco);
+    cJSON_AddBoolToObject(ev, "foco_sozinho", foco.rodando);
+    cJSON_AddBoolToObject(ev, "avisei", avisei);
+    avisa_hermes_em(ev, avisei ? PONTE_JA_FALEI : pulou ? 0 : RESPOSTA_POMODORO_MS);
+    if (foco.rodando) avisa_foco_inicio();     // o foco seguinte começou sozinho
     passo = P_FOCO;
     atualizar();
 }
@@ -756,10 +953,11 @@ static void atualiza_escolher(void)
     int n = 0;
     for (int i = 0; i < n_missao() && n < 3; i++)
         if (!missao[i].f) { cartao_tarefa(&missao[i], true); n++; }
-    for (int i = 0; i < (int)N_BONUS && n < 2 && !dificil; i++)   // no dia difícil, só a missão
+    for (int i = 0; i < n_b && n < 2 && !dificil; i++)   // no dia difícil, só a missão
         if (!bonus[i].f) { cartao_tarefa(&bonus[i], false); n++; }
     if (!n) {
-        lv_obj_t *l = texto(esc_lista, "A missão de hoje já foi. Se quiser mais uma coisa, escreve aqui embaixo.",
+        lv_obj_t *l = texto(esc_lista, n_m + n_b ? "A missão de hoje já foi. Se quiser mais uma coisa, escreve aqui embaixo."
+                                                 : "Ainda não tem missão hoje. Me conta na Conversa, ou escreve aqui embaixo.",
                             f_corpo, C_FRACO);
         lv_obj_set_width(l, LV_PCT(100));
         lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
@@ -880,7 +1078,7 @@ static void ev_cfg_salvar(lv_event_t *e)
     pomo_editando.sozinha = lv_obj_has_state(cfg_sozinha, LV_STATE_CHECKED);
     pomo = pomo_editando;
     pomo_guarda();
-    foco.resto = pomo.foco * 60;          // a engrenagem só aparece com o foco parado
+    foco.resto = foco.total = pomo.foco * 60;   // a engrenagem só aparece com o foco parado
     if (foco.bloco > pomo.blocos) foco.bloco = 1;
     vai_para(passo_antes_cfg);
 }
@@ -924,13 +1122,22 @@ static lv_obj_t *linha_config(lv_obj_t *pai, const char *nome, const char *sub, 
 }
 
 // ---- 3. foco ----
-static void ev_foco_btn(lv_event_t *e) { foco.rodando = !foco.rodando; atualizar(); }
+static void ev_foco_btn(lv_event_t *e)
+{
+    bool do_zero = !foco.rodando && foco.resto == foco.total;   // "Começar" (não "Continuar")
+    foco.rodando = !foco.rodando;
+    if (do_zero) avisa_foco_inicio();
+    atualizar();
+}
 
+// "Cancelar" (antes de começar) e "Parar" (depois) voltam para a lista: escolher
+// uma tarefa sem querer não pode prender ela no relógio.
 static void ev_foco_parar(lv_event_t *e)
 {
     foco.rodando = false;
-    foco.resto = pomo.foco * 60;
-    atualizar();
+    foco.resto = foco.total = pomo.foco * 60;
+    for (int i = 0; i < G_TOTAL; i++) descarta_guardada(i);
+    vai_para(P_ESCOLHER);
 }
 
 static void ev_trocar_tarefa(lv_event_t *e) { if (!foco.rodando) vai_para(P_ESCOLHER); }
@@ -938,7 +1145,7 @@ static void ev_trocar_tarefa(lv_event_t *e) { if (!foco.rodando) vai_para(P_ESCO
 static void atualiza_foco(void)
 {
     char s[64];
-    int total = pomo.foco * 60;
+    int total = foco.total;
     snprintf(s, sizeof s, "%02d:%02d", foco.resto / 60, foco.resto % 60);
     lv_label_set_text(foco_num, s);
     lv_arc_set_range(foco_arco, 0, total);
@@ -946,8 +1153,7 @@ static void atualiza_foco(void)
 
     bool comecado = foco.resto < total;
     lv_label_set_text(foco_btn_txt, foco.rodando ? "Pausar" : comecado ? "Continuar" : "Começar");
-    if (comecado) lv_obj_remove_flag(foco_parar, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(foco_parar, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(lv_obj_get_child(foco_parar, 0), comecado ? "Parar" : "Cancelar");
     lv_label_set_text(foco_sub, foco.rodando ? "foco" : comecado ? "pausado" : "pronta quando você estiver");
     lv_label_set_text(foco_tarefa, tarefa_atual);
 
@@ -956,11 +1162,6 @@ static void atualiza_foco(void)
     else snprintf(hoje, sizeof hoje, "%d %s hoje", foco.feitos, foco.feitos == 1 ? "concluído" : "concluídos");
     snprintf(s, sizeof s, "Bloco %d de %d · %s", foco.bloco, pomo.blocos, hoje);
     lv_label_set_text(foco_blocos, s);
-
-    if (foco.rodando) balao_fala(p_balao, NULL, NULL);   // quieta: divide a mesa com o seu foco
-    else if (comecado) balao_fala(p_balao, "Pausa é pausa.", "Tô aqui quando voltar.");
-    else if (dificil) balao_fala(p_balao, "Se quiser, dez minutinhos já valem.", NULL);
-    else balao_fala(p_balao, "Começar é a parte difícil.", "Eu começo junto.");
 }
 
 // ---- 4. pausa ----
@@ -972,7 +1173,7 @@ static const char *CUIDADO_FALA[3][2] = {
 };
 
 static void ev_pausa_btn(lv_event_t *e) { pausa.rodando = !pausa.rodando; atualizar(); }
-static void ev_pular(lv_event_t *e) { fim_da_pausa(); }
+static void ev_pular(lv_event_t *e) { fim_da_pausa(true); }
 
 static void ev_cuidado(lv_event_t *e)
 {
@@ -996,22 +1197,24 @@ static void atualiza_pausa(void)
     for (int i = 0; i < 3; i++)
         lv_obj_set_style_border_color(pau_cuidado[i], i == pausa.cuidado ? C_OLIVA : C_LINHA, 0);
 
-    if (pausa.cuidado >= 0) balao_fala(p_balao, CUIDADO_FALA[pausa.cuidado][0], CUIDADO_FALA[pausa.cuidado][1]);
-    else if (pausa.longa) balao_fala(p_balao, "Ciclo inteiro! Isso é muito.", "Agora descansa de verdade.");
+    if (pausa.cuidado >= 0)
+        snprintf(s, sizeof s, "%s %s", CUIDADO_FALA[pausa.cuidado][0], CUIDADO_FALA[pausa.cuidado][1]);
+    else if (pausa.longa) strlcpy(s, "Ciclo inteiro! Agora descansa de verdade.", sizeof s);
     else {
         int m = pomo.curta;
         if (m <= 10) snprintf(s, sizeof s, "Vai existir longe da cadeira por %s %s.", EXTENSO[m], m == 1 ? "minuto" : "minutos");
         else snprintf(s, sizeof s, "Vai existir longe da cadeira por %d minutos.", m);
-        balao_fala(p_balao, "Bloco concluído.", s);
     }
+    lv_label_set_text(pau_dica, s);
 }
 
 // ---- a tela ----
+// No meio da tela: o lado direito era da Lylu, que saiu da aba Foco.
 static lv_obj_t *novo_painel(lv_obj_t *t)
 {
     lv_obj_t *p = caixa(t);
     lv_obj_set_size(p, 640, TELA_H);
-    lv_obj_set_pos(p, 0, 0);
+    lv_obj_set_pos(p, (TELA_W - 640) / 2, 0);
     return p;
 }
 
@@ -1087,11 +1290,13 @@ static void cria_pomodoro(lv_obj_t *t)
     botao(bts, "Salvar", true, ev_cfg_salvar);
     botao(bts, "Cancelar", false, ev_cfg_cancelar);
 
-    // 3. foco
+    // 3. foco: a tela inteira é do relógio, no meio
     p = painel[P_FOCO] = novo_painel(t);
+    lv_obj_set_width(p, TELA_W);
+    lv_obj_set_x(p, 0);
     col = caixa(p);
     lv_obj_set_size(col, 420, 520);
-    lv_obj_set_pos(col, 20, 58);
+    lv_obj_align(col, LV_ALIGN_TOP_MID, 0, 58);
     lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(col, 14, 0);
@@ -1168,16 +1373,11 @@ static void cria_pomodoro(lv_obj_t *t)
     lv_obj_set_style_margin_top(bts, 16, 0);
     pau_btn_txt = lv_obj_get_child(botao(bts, "Começar pausa", true, ev_pausa_btn), 0);
     botao(bts, "Pular", false, ev_pular);
-
-    // o lado da Lylu
-    p_mesa = caixa(t);
-    lv_obj_set_size(p_mesa, 400, 8);
-    lv_obj_set_pos(p_mesa, 620, 532);
-    lv_obj_set_style_bg_color(p_mesa, C_LINHA, 0);
-    lv_obj_set_style_bg_opa(p_mesa, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(p_mesa, 4, 0);
-
-    p_balao = balao(t, 650, 64, 268);
+    pau_dica = texto(col, "", f_corpo, C_TINTA);
+    lv_obj_set_width(pau_dica, 560);
+    lv_label_set_long_mode(pau_dica, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(pau_dica, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_margin_top(pau_dica, 12, 0);
 
     p_engrenagem = lv_button_create(t);
     lv_obj_set_size(p_engrenagem, 44, 44);
@@ -1201,18 +1401,10 @@ static void atualiza_pomodoro(void)
     bool engrenagem = passo == P_ESCOLHER || (passo == P_FOCO && !foco.rodando);
     if (engrenagem) lv_obj_remove_flag(p_engrenagem, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(p_engrenagem, LV_OBJ_FLAG_HIDDEN);
-    if (passo == P_FOCO) lv_obj_remove_flag(p_mesa, LV_OBJ_FLAG_HIDDEN);
-    else lv_obj_add_flag(p_mesa, LV_OBJ_FLAG_HIDDEN);
 
     switch (passo) {
-    case P_ESCOLHER:
-        atualiza_escolher();
-        balao_fala(p_balao, "Não precisa escolher a tarefa perfeita.", "Escolhe uma possível.");
-        break;
-    case P_CONFIGURAR:
-        atualiza_config();
-        balao_fala(p_balao, "Vinte e cinco é padrão, não mandamento.", "O cérebro não assina contrato.");
-        break;
+    case P_ESCOLHER:   atualiza_escolher(); break;
+    case P_CONFIGURAR: atualiza_config(); break;
     case P_FOCO:  atualiza_foco(); break;
     case P_PAUSA: atualiza_pausa(); break;
     }
@@ -1225,11 +1417,6 @@ static void tique_pomodoro(void)
     else if (passo == P_PAUSA) atualiza_pausa();
 }
 
-static anim_t anim_foco(void)
-{
-    return A_POMODORO;      // sentada com o notebook, trabalhando junto
-}
-
 // ---------------------------------------------------------------- TAREFAS
 // A missão do dia em cima, o bônus embaixo, a Lylu do lado esquerdo olhando.
 static lv_obj_t *tar_contador, *tar_feitas;
@@ -1237,14 +1424,26 @@ static lv_obj_t *tar_contador, *tar_feitas;
 static int feitas_hoje(void)
 {
     int n = missao_feita();
-    for (int i = 0; i < (int)N_BONUS; i++) n += bonus[i].f;
+    for (int i = 0; i < n_b; i++) n += bonus[i].f;
     return n;
 }
 
+static bool e_da_missao(const tarefa_t *t) { return t >= missao && t < missao + MAX_MISSAO; }
+
+// Marcar aqui é marcar de verdade: o Hermes fica sabendo (e conclui no Todoist).
 static void ev_tarefa(lv_event_t *e)
 {
     tarefa_t *t = lv_event_get_user_data(e);
+    bool antes = missao_completa();
     t->f = !t->f;
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "tipo", t->f ? "tarefa_feita" : "tarefa_desfeita");
+    cJSON_AddStringToObject(ev, "t", t->t);
+    if (t->id[0]) cJSON_AddStringToObject(ev, "id", t->id);
+    cJSON_AddBoolToObject(ev, "missao", e_da_missao(t));
+    if (!antes && missao_completa()) cJSON_AddTrueToObject(ev, "missao_completa");
+    avisa_hermes(ev);
+    guarda_hermes();
     lv_async_call(atualizar_depois, NULL);
 }
 
@@ -1344,8 +1543,10 @@ static void atualiza_tarefas(void)
 {
     lv_obj_clean(lista_missao);
     for (int i = 0; i < n_missao(); i++) item(lista_missao, &missao[i], true);
+    if (!n_missao()) texto(lista_missao, "Nenhuma missão hoje, por enquanto.", f_corpo, C_FRACO);
     lv_obj_clean(lista_bonus);
-    for (int i = 0; i < (int)N_BONUS; i++) item(lista_bonus, &bonus[i], false);
+    for (int i = 0; i < n_b; i++) item(lista_bonus, &bonus[i], false);
+    if (!n_b) texto(lista_bonus, "Nada no bônus.", f_corpo_p, C_FRACO);
 
     if (dificil) lv_obj_add_flag(caixa_bonus, LV_OBJ_FLAG_HIDDEN);   // no dia difícil o bônus some
     else lv_obj_remove_flag(caixa_bonus, LV_OBJ_FLAG_HIDDEN);
@@ -1361,29 +1562,48 @@ static void atualiza_tarefas(void)
     else snprintf(s, sizeof s, "%d coisas feitas hoje", h);
     lv_label_set_text(tar_feitas, s);
 
-    if (f == n) balao_fala(tar_balao, "Missão do dia batida!", "O resto é enfeite.");
+    if (!n) balao_fala(tar_balao, "Hoje ainda não tem missão.", "Se quiser, me fala uma.");
+    else if (f == n) balao_fala(tar_balao, "Missão do dia batida!", "O resto é enfeite.");
     else if (dificil) balao_fala(tar_balao, cortada ? "Uma coisa só hoje." : "Hoje é só isso aqui.",
                                  cortada ? "Já é o dia inteiro." : "Sem pressa.");
-    else if (f == 0) balao_fala(tar_balao, n == 1 ? "Uma coisinha e o dia tá ganho." : "Duas coisinhas e o dia tá ganho.",
+    else if (f == 0) balao_fala(tar_balao, n == 1 ? "Uma coisinha e o dia tá ganho."
+                                         : n == 2 ? "Duas coisinhas e o dia tá ganho." : "Três coisinhas e o dia tá ganho.",
                                 "O resto é bônus.");
-    else balao_fala(tar_balao, "Metade da missão já foi.", "Tô vendo, viu?");
+    else balao_fala(tar_balao, n == 2 ? "Metade da missão já foi." : f == n - 1 ? "Falta só uma." : "Uma já foi.",
+                    "Tô vendo, viu?");
 }
 
 // ---------------------------------------------------------------- RECADOS
 // Um recado por vez: o que a Lylu guardou pra você não precisar guardar na
 // cabeça. "Entendi" tira da fila; "Lembrar depois" manda pro fim dela.
-// Por enquanto os recados moram aqui; o próximo passo é vir do n8n/Supabase.
+// Os recados vêm do Hermes (ver HERMES) e ficam guardados na NVS. Com data em
+// "quando" (AAAA-MM-DD ou AAAA-MM-DDTHH:MM), a placa calcula sozinha se é hoje,
+// amanhã ou sexta; "dia" e "hora" em texto livre são para quando não há data.
+#define MAX_RECADOS 8
+static const char *DIAS[] = { "domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
+                              "sexta-feira", "sábado" };
 typedef struct {
-    const char *dia, *dia_maiusc, *hora, *titulo, *detalhe, *tipo, *fala, *fala_forte;
+    char id[40], quando[20], dia[24], hora[8], titulo[96], detalhe[160], tipo[24], fala[120], fala_forte[120];
     bool visto;
 } recado_t;
 
-static recado_t recados[] = {
-    { "amanhã", "AMANHÃ", "14:00", "Postar a placa nos Correios",
-      "Levar o display com defeito para devolução.", "lembrete",
-      "Mica, amanhã tem Correios.", "Eu te lembro na hora.", false },
-};
-#define N_RECADOS (sizeof(recados) / sizeof(recados[0]))
+static recado_t *recados;         // na PSRAM, como as tarefas (ver estado)
+static int n_rec;
+
+static void *na_psram(size_t n, size_t tam)
+{
+    void *p = heap_caps_calloc(n, tam, MALLOC_CAP_SPIRAM);
+    return p ? p : calloc(n, tam);
+}
+
+// Chamada no começo do app_main, antes de qualquer tela existir. As listas
+// começam vazias; o que o Hermes mandou volta da NVS em carrega_hermes.
+static void cria_listas(void)
+{
+    missao = na_psram(MAX_MISSAO, sizeof *missao);
+    bonus = na_psram(MAX_BONUS, sizeof *bonus);
+    recados = na_psram(MAX_RECADOS, sizeof *recados);
+}
 
 static int recado_atual;          // índice do que está na frente da fila
 static bool recado_adiado;        // acabou de tocar em "Lembrar depois"
@@ -1392,23 +1612,70 @@ static lv_obj_t *rec_titulo, *rec_sub, *rec_cartao, *rec_quando, *rec_tipo, *rec
 static int recados_pendentes(void)
 {
     int n = 0;
-    for (int i = 0; i < (int)N_RECADOS; i++) n += !recados[i].visto;
+    for (int i = 0; i < n_rec; i++) n += !recados[i].visto;
     return n;
 }
 
 // O próximo não visto, dando a volta na fila a partir de "de".
 static int proximo_recado(int de)
 {
-    for (int k = 0; k < (int)N_RECADOS; k++) {
-        int i = (de + k) % N_RECADOS;
+    for (int k = 0; k < n_rec; k++) {
+        int i = (de + k) % n_rec;
         if (!recados[i].visto) return i;
     }
     return -1;
 }
 
+// "amanhã" -> "AMANHÃ": ASCII e o pedaço latino do UTF-8 (á, ã, ç, é...).
+static void maiusculas(char *s)
+{
+    for (unsigned char *p = (unsigned char *)s; *p; p++) {
+        if (*p >= 'a' && *p <= 'z') *p -= 'a' - 'A';
+        else if (*p == 0xC3 && p[1] >= 0xA0 && p[1] <= 0xBE && p[1] != 0xB7) { p[1] -= 0x20; p++; }
+    }
+}
+
+// O dia e a hora de um recado, do jeito que se fala: "hoje", "amanhã", "sexta-feira", "12/11".
+static void recado_quando(const recado_t *r, char *dia, size_t nd, char *hora, size_t nh)
+{
+    int a, m, d, hh = -1, mm = 0;
+    if (r->quando[0] && sscanf(r->quando, "%d-%d-%d", &a, &m, &d) == 3) {
+        const char *t = strpbrk(r->quando, "T ");
+        if (t) sscanf(t + 1, "%d:%d", &hh, &mm);
+        time_t now = time(NULL);
+        struct tm hoje, alvo = { .tm_year = a - 1900, .tm_mon = m - 1, .tm_mday = d, .tm_hour = 12, .tm_isdst = -1 };
+        localtime_r(&now, &hoje);
+        hoje.tm_hour = 12;
+        hoje.tm_min = hoje.tm_sec = 0;
+        int dif = (int)floor(difftime(mktime(&alvo), mktime(&hoje)) / 86400.0 + 0.5);
+        if (dif == 0) strlcpy(dia, "hoje", nd);
+        else if (dif == 1) strlcpy(dia, "amanhã", nd);
+        else if (dif == -1) strlcpy(dia, "ontem", nd);
+        else if (dif > 1 && dif < 7) strlcpy(dia, DIAS[alvo.tm_wday], nd);
+        else snprintf(dia, nd, "%02d/%02d", d, m);
+        if (hh >= 0) snprintf(hora, nh, "%02d:%02d", hh, mm);
+        else strlcpy(hora, r->hora, nh);
+        return;
+    }
+    strlcpy(dia, r->dia[0] ? r->dia : "logo", nd);
+    strlcpy(hora, r->hora, nh);
+}
+
+static void avisa_recado(const char *tipo, const recado_t *r)
+{
+    cJSON *ev = cJSON_CreateObject();
+    cJSON_AddStringToObject(ev, "tipo", tipo);
+    cJSON_AddStringToObject(ev, "titulo", r->titulo);
+    if (r->id[0]) cJSON_AddStringToObject(ev, "id", r->id);
+    avisa_hermes(ev);
+}
+
 static void ev_recado_entendi(lv_event_t *e)
 {
+    if (recado_atual >= n_rec) return;
     recados[recado_atual].visto = true;
+    avisa_recado("recado_entendi", &recados[recado_atual]);
+    guarda_hermes();
     recado_adiado = false;
     int p = proximo_recado(recado_atual + 1);
     if (p >= 0) recado_atual = p;
@@ -1417,6 +1684,8 @@ static void ev_recado_entendi(lv_event_t *e)
 
 static void ev_recado_depois(lv_event_t *e)
 {
+    if (recado_atual >= n_rec) return;
+    avisa_recado("recado_adiado", &recados[recado_atual]);
     recado_adiado = true;
     int p = proximo_recado(recado_atual + 1);
     if (p >= 0) recado_atual = p;
@@ -1503,15 +1772,19 @@ static void atualiza_recados(void)
         balao_fala(rec_balao, "Tudo guardado.", "Pode descansar a cabeça.");
         return;
     }
+    if (recado_atual >= n_rec || recados[recado_atual].visto) recado_atual = proximo_recado(0);
     recado_t *r = &recados[recado_atual];
-    char s[64];
-    snprintf(s, sizeof s, "Tem uma coisa pra %s", r->dia);
+    char s[64], dia[24], hora[8];
+    recado_quando(r, dia, sizeof dia, hora, sizeof hora);
+    snprintf(s, sizeof s, "Tem uma coisa pra %s", dia);
     lv_label_set_text(rec_titulo, s);
     lv_label_set_text(rec_sub, "Eu guardei aqui pra você não precisar guardar na cabeça.");
     lv_obj_remove_flag(rec_cartao, LV_OBJ_FLAG_HIDDEN);
-    snprintf(s, sizeof s, "%s · %s", r->dia_maiusc, r->hora);
+    maiusculas(dia);
+    if (hora[0]) snprintf(s, sizeof s, "%s · %s", dia, hora);
+    else strlcpy(s, dia, sizeof s);
     lv_label_set_text(rec_quando, s);
-    lv_label_set_text(rec_tipo, r->tipo);
+    lv_label_set_text(rec_tipo, r->tipo[0] ? r->tipo : "lembrete");
     lv_label_set_text(rec_nome, r->titulo);
     lv_label_set_text(rec_detalhe, r->detalhe);
 
@@ -1523,7 +1796,8 @@ static void atualiza_recados(void)
     lv_obj_remove_flag(rec_rodape, LV_OBJ_FLAG_HIDDEN);
 
     if (recado_adiado) balao_fala(rec_balao, "Tá bom.", "Eu te lembro mais tarde.");
-    else balao_fala(rec_balao, r->fala, r->fala_forte);
+    else if (r->fala[0]) balao_fala(rec_balao, r->fala, r->fala_forte);
+    else balao_fala(rec_balao, "Guardei isso pra você.", "Eu te lembro na hora.");
 }
 
 // ---------------------------------------------------------------- CASA (o cantinho da Lylu)
@@ -1621,8 +1895,6 @@ static void atualiza_casa(void)
 // ---------------------------------------------------------------- RELÓGIO
 static lv_obj_t *rel_saud, *rel_hora, *rel_data, *rel_cartao, *rel_c_hora, *rel_c_nome, *rel_c_sub, *rel_balao;
 
-static const char *DIAS[] = { "domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
-                              "sexta-feira", "sábado" };
 static const char *DIAS_CURTO[] = { "DOM", "SEG", "TER", "QUA", "QUI", "SEX", "SÁB" };
 static const char *MESES[] = { "janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
                                "agosto", "setembro", "outubro", "novembro", "dezembro" };
@@ -1691,10 +1963,12 @@ static void atualiza_relogio(void)
 {
     recado_t *r = proximo_pendente();
     if (r) {
+        char dia[24], hora[8];
+        recado_quando(r, dia, sizeof dia, hora, sizeof hora);
         lv_obj_remove_flag(rel_cartao, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(rel_c_hora, r->hora);
+        lv_label_set_text(rel_c_hora, hora[0] ? hora : "--:--");
         lv_label_set_text(rel_c_nome, r->titulo);
-        lv_label_set_text(rel_c_sub, r->dia);
+        lv_label_set_text(rel_c_sub, dia);
     } else lv_obj_add_flag(rel_cartao, LV_OBJ_FLAG_HIDDEN);
 
     time_t now = time(NULL);
@@ -1710,7 +1984,7 @@ static void atualiza_relogio(void)
 // ---------------------------------------------------------------- SEMANA
 // Por enquanto a placa só sabe do hoje: os outros dias ficam vazios, sem dado
 // inventado. Quando vier o histórico (Supabase), é só encher as colunas.
-static lv_obj_t *sem_col[7], *sem_nome[7], *sem_num[7], *sem_barras[7], *sem_total, *sem_prox;
+static lv_obj_t *sem_col[7], *sem_nome[7], *sem_num[7], *sem_barras[7], *sem_total, *sem_prox, *sem_balao;
 
 static void cria_semana(lv_obj_t *t)
 {
@@ -1755,8 +2029,7 @@ static void cria_semana(lv_obj_t *t)
     lv_obj_t *nota = texto(t, "Por enquanto eu só guardo o hoje. Os outros dias vêm depois.", f_corpo_p, C_FRACO);
     lv_obj_set_pos(nota, 44, 432);
 
-    lv_obj_t *b = balao(t, 652, 72, 290);
-    balao_fala(b, "A semana não é placar, Mica.", "É só um mapa pra eu te acompanhar.");
+    sem_balao = balao(t, 652, 72, 290);
 }
 
 static void atualiza_semana(void)
@@ -1791,10 +2064,14 @@ static void atualiza_semana(void)
 
     recado_t *r = proximo_pendente();
     if (r) {
-        snprintf(s, sizeof s, "%s, %s · %s", r->dia, r->hora, r->titulo);
-        if (s[0] >= 'a' && s[0] <= 'z') s[0] -= 'a' - 'A';   // "amanhã" -> "Amanhã"
-        lv_label_set_text(sem_prox, s);
+        char dia[24], hora[8], p[160];
+        recado_quando(r, dia, sizeof dia, hora, sizeof hora);
+        if (hora[0]) snprintf(p, sizeof p, "%s, %s · %s", dia, hora, r->titulo);
+        else snprintf(p, sizeof p, "%s · %s", dia, r->titulo);
+        if (p[0] >= 'a' && p[0] <= 'z') p[0] -= 'a' - 'A';   // "amanhã" -> "Amanhã"
+        lv_label_set_text(sem_prox, p);
     } else lv_label_set_text(sem_prox, "Nada guardado pra frente. Semana leve.");
+    balao_fala(sem_balao, "A semana não é placar, Mica.", "É só um mapa pra eu te acompanhar.");
 }
 
 // ---------------------------------------------------------------- WI-FI
@@ -2113,16 +2390,16 @@ static void cria_wifi(void)
 static volatile bool rede_mudou;
 static void ev_rede(void) { rede_mudou = true; }
 
-static volatile bool ponte_mudou;          // a ponte avisou (ver AJUSTES)
+static volatile bool ponte_mudou;          // a ponte avisou (ver HERMES)
 static void atualiza_linha_ponte(void);
-static void mostra_fala_da_ponte(void);
+static void recebe_do_hermes(void);
 
 static void olha_rede(lv_timer_t *t)
 {
     if (ponte_mudou) {
         ponte_mudou = false;
         atualiza_linha_ponte();
-        mostra_fala_da_ponte();
+        recebe_do_hermes();
     }
     if (!rede_mudou) return;
     rede_mudou = false;
@@ -2233,28 +2510,7 @@ static void cria_microfone(void)
 // Tudo numa lista só, com risquinho entre as linhas, e embaixo três cartõezinhos
 // com o estado da internet de verdade (nada de "online" inventado).
 static lv_obj_t *aj_brilho_v, *aj_info[3], *aj_ponte_sub, *aj_balao;
-
-// ---- a ponte com o Hermes (ver ponte.h) ----
-// A resposta chega pela tarefa da ponte, não pela da tela: ela só guarda o texto
-// e levanta uma bandeira, e o timer da tela (olha_rede) mostra. Esperar a trava
-// da tela lá dentro seguraria a ponte inteira enquanto a tela desenha.
-#define FALA_MAX 280                 // o balão dos Ajustes não comporta mais que isso
-static char ponte_fala[FALA_MAX + 4];
-static volatile bool ponte_fala_nova;
-static portMUX_TYPE ponte_trava = portMUX_INITIALIZER_UNLOCKED;
-
-static void ev_ponte(const char *fala, bool online)
-{
-    (void)online;
-    if (fala) {
-        portENTER_CRITICAL(&ponte_trava);
-        strlcpy(ponte_fala, fala, FALA_MAX + 1);
-        if (strlen(fala) > FALA_MAX) strcpy(ponte_fala + FALA_MAX - 3, "...");
-        ponte_fala_nova = true;
-        portEXIT_CRITICAL(&ponte_trava);
-    }
-    ponte_mudou = true;
-}
+static const char *aj_fala = "Se alguma coisa incomodar, a gente muda.", *aj_forte = "A tela é sua.";
 
 static void atualiza_linha_ponte(void)
 {
@@ -2265,26 +2521,18 @@ static void atualiza_linha_ponte(void)
     lv_obj_set_style_text_color(aj_ponte_sub, ponte_online() ? C_OLIVA : C_FRACO, 0);
 }
 
-static void mostra_fala_da_ponte(void)
-{
-    if (!ponte_fala_nova) return;
-    char fala[FALA_MAX + 4];
-    portENTER_CRITICAL(&ponte_trava);
-    strcpy(fala, ponte_fala);
-    ponte_fala_nova = false;
-    portEXIT_CRITICAL(&ponte_trava);
-    balao_fala(aj_balao, fala, NULL);
-    audio_blip();
-}
-
 static void ev_testar_ponte(lv_event_t *e)
 {
-    if (!ponte_configurada())
-        balao_fala(aj_balao, "Falta meu token de pareamento.", "Ele não vai pro Git, relaxa.");
+    if (!ponte_configurada()) { aj_fala = "Falta meu token de pareamento."; aj_forte = "Ele não vai pro Git, relaxa."; }
     else if (ponte_enviar_texto("Teste da Lylu física: responda apenas confirmando que você me encontrou."))
-        balao_fala(aj_balao, "Enviei pro Hermes.", "Agora eu espero a resposta.");
-    else
-        balao_fala(aj_balao, "A fila não respondeu.", "Tenta de novo quando a conexão estiver verde.");
+        { aj_fala = "Enviei pro Hermes."; aj_forte = "Agora eu espero a resposta."; }
+    else { aj_fala = "A fila não respondeu."; aj_forte = "Tenta de novo quando a conexão estiver verde."; }
+    balao_fala(aj_balao, aj_fala, aj_forte);
+}
+
+static void ev_silencio(lv_event_t *e)
+{
+    silencio_foco = lv_obj_has_state(lv_event_get_target(e), LV_STATE_CHECKED);
 }
 
 static lv_obj_t *linha_ajuste(lv_obj_t *pai, const char *nome, const char *sub)
@@ -2369,7 +2617,8 @@ static void cria_ajustes(lv_obj_t *t)
 
     aj_dificil = chave(linha_ajuste(lista, "Modo dia difícil", "Só a missão aparece, sem cutucadas"), false);
     lv_obj_add_event_cb(aj_dificil, ev_dificil, LV_EVENT_VALUE_CHANGED, NULL);
-    chave(linha_ajuste(lista, "Silêncio no foco", "Nenhum som enquanto o timer roda"), true);
+    lv_obj_t *sil = chave(linha_ajuste(lista, "Silêncio no foco", "Nenhum som enquanto o timer roda"), true);
+    lv_obj_add_event_cb(sil, ev_silencio, LV_EVENT_VALUE_CHANGED, NULL);
 
     lv_obj_t *lb = linha_ajuste(lista, "Brilho da tela", "Arrasta pra deixar confortável");
     lv_obj_set_style_border_width(lb, 0, 0);            // a última, sem risquinho
@@ -2403,7 +2652,6 @@ static void cria_ajustes(lv_obj_t *t)
     }
 
     aj_balao = balao(t, 652, 72, 290);
-    balao_fala(aj_balao, "Se alguma coisa incomodar, a gente muda.", "A tela é sua.");
 }
 
 static void atualiza_ajustes(void)
@@ -2413,11 +2661,827 @@ static void atualiza_ajustes(void)
     lv_obj_set_style_text_color(aj_info[0], on ? C_OLIVA : C_AMBAR, 0);
     lv_label_set_text(aj_info[1], rede_nome()[0] ? rede_nome() : "nenhuma");
     lv_label_set_text(aj_info[2], on ? rede_ip() : "—");
+    balao_fala(aj_balao, aj_fala, aj_forte);
+}
+
+// ---------------------------------------------------------------- HERMES
+// Tudo o que vem do Hermes chega pela tarefa da ponte, não pela da tela: o aviso
+// só põe numa fila e levanta uma bandeira, e o timer da tela (olha_rede) tira da
+// fila e aplica. Esperar a trava da tela lá dentro seguraria a ponte inteira
+// enquanto a tela desenha (o mesmo tropeço do DHCP com o Wi-Fi).
+//
+// O que ele pode mandar (kind "chat" é fala; "estado" e "comando" passam pelo
+// mesmo aplica(), qualquer combinação destas chaves):
+//   tarefas {missao:[...], bonus:[...]}  cada tarefa "texto" ou {id, t, f}; troca as listas
+//   marcar {alvo: id ou texto, f}        recado {titulo, quando|dia+hora, detalhe, tipo, fala, forte, id}
+//   recados [...] (troca todos)          recado_apagar: id ou título
+//   humor: nome ou {nome, minutos}       fala {text, forte}
+//   pomodoro {acao: iniciar|pausar|continuar|parar|config, tarefa, minutos, foco, curta, blocos, longa}
+//   tela: "Tarefas"...                   dificil: true/false
+// minha: é a resposta a uma fala desta placa (a do app do celular toca, mas não
+// tira a Conversa do "pensando").
+typedef struct { char kind[12]; char *payload; int16_t *audio; size_t amostras; bool minha; } entrada_t;
+static QueueHandle_t caixa_entrada;
+
+typedef enum { CV_FECHADA, CV_OUVINDO, CV_ENVIANDO, CV_PENSANDO, CV_RESPONDEU, CV_ERRO } cv_passo_t;
+static cv_passo_t cv_passo = CV_FECHADA;
+static volatile bool cv_subiu, cv_falhou;
+static const char *volatile cv_motivo;
+static void cv_respondeu(const char *texto, const char *transcricao);
+
+static void ev_ponte(ponte_evento_t ev, const char *kind, const char *texto, int16_t *audio, size_t n)
+{
+    switch (ev) {
+    case PONTE_VOZ_SUBIU: cv_subiu = true; break;
+    case PONTE_VOZ_FALHOU: cv_motivo = texto; cv_falhou = true; break;
+    case PONTE_MENSAGEM:
+    case PONTE_RESPOSTA: {
+        entrada_t e = { .audio = audio, .amostras = n, .minha = ev == PONTE_RESPOSTA };
+        strlcpy(e.kind, kind ? kind : "chat", sizeof e.kind);
+        e.payload = strdup(texto ? texto : "{}");
+        if (!caixa_entrada || !e.payload || xQueueSend(caixa_entrada, &e, 0) != pdTRUE) {
+            ESP_LOGW(TAG, "caixa de entrada cheia: perdi uma mensagem do Hermes");
+            free(e.payload);
+            free(audio);
+        }
+        break;
+    }
+    default: break;
+    }
+    ponte_mudou = true;
+}
+
+// O balão é desenhado com as fontes TTF da Lylu, que não têm emoji: sairia um
+// quadradinho vazio. Copia tirando os emoji e corta sem partir uma letra no meio.
+static void copia_limpo(char *dst, size_t cap, const char *src)
+{
+    size_t j = 0;
+    const unsigned char *s = (const unsigned char *)(src ? src : "");
+    while (*s) {
+        int n = *s < 0x80 ? 1 : (*s >> 5) == 6 ? 2 : (*s >> 4) == 14 ? 3 : (*s >> 3) == 30 ? 4 : 1;
+        bool fora = n == 4                                                     // emoji e cia.
+                 || (n == 3 && s[0] == 0xEF && s[1] == 0xB8 && s[2] == 0x8F)  // seletor de variação
+                 || (n == 3 && s[0] == 0xE2 && s[1] == 0x80 && s[2] == 0x8D)  // junção de emoji
+                 || (n == 3 && s[0] == 0xE2 && s[1] >= 0x98 && s[1] <= 0x9E); // ☀ ♥ ✨ ❤...
+        for (int k = 1; k < n; k++) if (!s[k]) { n = k; fora = true; break; }
+        if (!fora) {
+            if (j + n + 3 >= cap) { if (cap >= 4) strcpy(dst + j, "..."); return; }
+            memcpy(dst + j, s, n);
+            j += n;
+        }
+        s += n;
+    }
+    dst[j] = 0;
+}
+
+static const char *texto_de(cJSON *o, const char *chave)
+{
+    cJSON *x = cJSON_GetObjectItemCaseSensitive(o, chave);
+    return cJSON_IsString(x) ? x->valuestring : NULL;
+}
+
+static void copia_campo(char *dst, size_t cap, cJSON *o, const char *chave)
+{
+    const char *s = texto_de(o, chave);
+    copia_limpo(dst, cap, s ? s : "");
+}
+
+// ---- a fala e o humor ----
+static lv_color_t cor_do_humor(const char *h)
+{
+    static const struct { const char *nome; uint32_t cor; } CORES[] = {
+        { "comemorando", 0xf4b860 }, { "alertando", 0xf4b860 }, { "animada", 0xbfd384 },
+        { "concentrada", 0xbfd384 }, { "cuidadora", 0x8ec5ff }, { "curiosa", 0x8ec5ff },
+        { "atenta", 0x8ec5ff }, { "brincalhona", 0xb9a6ff }, { "julgadora", 0xb9a6ff },
+        { "descansando", 0xb9a6ff }, { "tranquila", 0xb9a6ff }, { "entediada", 0x93a99c },
+    };
+    for (size_t i = 0; i < sizeof CORES / sizeof *CORES; i++)
+        if (!strcmp(h, CORES[i].nome)) return lv_color_hex(CORES[i].cor);
+    return C_OLIVA;
+}
+
+static void humor_do_hermes(const char *nome, int minutos)
+{
+    if (!nome || !*nome) return;
+    copia_limpo(h_humor, sizeof h_humor, nome);
+    h_humor_ate = agora_ms() + (int64_t)(minutos > 0 ? minutos : 60) * 60000;
+}
+
+static bool em_silencio(void) { return silencio_foco && foco.rodando; }
+
+static void lylu_fala(const char *texto, const char *forte, int16_t *audio, size_t amostras)
+{
+    copia_limpo(h_fala, sizeof h_fala, texto);
+    copia_limpo(h_forte, sizeof h_forte, forte);
+    if (!h_fala[0]) { free(audio); return; }
+    // Fica no balão o tempo da voz e mais um pouco para ler: 20 s no mínimo.
+    int64_t voz_ms = (int64_t)amostras * 1000 / 16000;
+    h_fala_ate = agora_ms() + (voz_ms + 12000 > 20000 ? voz_ms + 12000 : 20000);
+    // No foco com silêncio ligado, só o balão; gravando a fala dela, também
+    // (senão a resposta entraria na gravação).
+    if (em_silencio() || cv_passo == CV_OUVINDO) free(audio);
+    else if (audio) audio_tocar(audio, amostras);
+    else audio_blip();
+}
+
+// ---- tarefas ----
+// Uma tarefa vem como "texto" ou como {id, t, f}.
+static void le_tarefa(tarefa_t *t, cJSON *x)
+{
+    memset(t, 0, sizeof *t);
+    if (cJSON_IsString(x)) { copia_limpo(t->t, sizeof t->t, x->valuestring); return; }
+    copia_campo(t->id, sizeof t->id, x, "id");
+    copia_campo(t->t, sizeof t->t, x, "t");
+    cJSON *f = cJSON_GetObjectItemCaseSensitive(x, "f");
+    t->f = cJSON_IsTrue(f);
+}
+
+static tarefa_t *acha_igual(tarefa_t *lista, int n, const tarefa_t *t)
+{
+    for (int i = 0; i < n; i++)
+        if ((t->id[0] && !strcmp(lista[i].id, t->id)) || !strcmp(lista[i].t, t->t)) return &lista[i];
+    return NULL;
+}
+
+// Sem "f" explícito, a tarefa que já existia (mesmo id ou mesmo texto) continua
+// como estava: se ela marcou aqui e o Hermes reenviou a lista, não desmarca.
+static int le_lista(tarefa_t *lista, int max, int n_antes, cJSON *arr)
+{
+    tarefa_t antes[MAX_BONUS];
+    memcpy(antes, lista, sizeof(tarefa_t) * n_antes);
+    int n = 0;
+    cJSON *x;
+    cJSON_ArrayForEach(x, arr) {
+        if (n >= max) break;
+        tarefa_t nova;
+        le_tarefa(&nova, x);
+        if (!nova.t[0]) continue;
+        tarefa_t *velha = acha_igual(antes, n_antes, &nova);
+        if (velha && !cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(x, "f"))) nova.f = velha->f;
+        lista[n++] = nova;
+    }
+    return n;
+}
+
+static void aplica_marcar(cJSON *m)
+{
+    const char *alvo = texto_de(m, "alvo");
+    if (!alvo) return;
+    cJSON *f = cJSON_GetObjectItemCaseSensitive(m, "f");
+    bool feita = !cJSON_IsBool(f) || cJSON_IsTrue(f);
+    for (int i = 0; i < n_m + n_b; i++) {
+        tarefa_t *t = i < n_m ? &missao[i] : &bonus[i - n_m];
+        if ((t->id[0] && !strcmp(t->id, alvo)) || !strcasecmp(t->t, alvo)) t->f = feita;
+    }
+}
+
+// ---- recados ----
+static void le_recado(recado_t *r, cJSON *x)
+{
+    bool visto = r->visto;
+    char id[40];
+    strlcpy(id, r->id, sizeof id);
+    memset(r, 0, sizeof *r);
+    copia_campo(r->id, sizeof r->id, x, "id");
+    copia_campo(r->quando, sizeof r->quando, x, "quando");
+    copia_campo(r->dia, sizeof r->dia, x, "dia");
+    copia_campo(r->hora, sizeof r->hora, x, "hora");
+    copia_campo(r->titulo, sizeof r->titulo, x, "titulo");
+    copia_campo(r->detalhe, sizeof r->detalhe, x, "detalhe");
+    copia_campo(r->tipo, sizeof r->tipo, x, "tipo");
+    copia_campo(r->fala, sizeof r->fala, x, "fala");
+    copia_campo(r->fala_forte, sizeof r->fala_forte, x, "forte");
+    cJSON *v = cJSON_GetObjectItemCaseSensitive(x, "visto");
+    // O mesmo recado reenviado (mesmo id) não volta a aparecer se ela já leu.
+    r->visto = cJSON_IsBool(v) ? cJSON_IsTrue(v) : visto && r->id[0] && !strcmp(r->id, id);
+}
+
+static int acha_recado(const char *alvo)
+{
+    for (int i = 0; alvo && i < n_rec; i++)
+        if ((recados[i].id[0] && !strcmp(recados[i].id, alvo)) || !strcasecmp(recados[i].titulo, alvo)) return i;
+    return -1;
+}
+
+static void tira_recado(int i)
+{
+    if (i < 0 || i >= n_rec) return;
+    memmove(&recados[i], &recados[i + 1], sizeof(recado_t) * (n_rec - i - 1));
+    n_rec--;
+    if (recado_atual >= n_rec) recado_atual = 0;
+}
+
+static void poe_recado(cJSON *x)
+{
+    const char *id = texto_de(x, "id");
+    int i = acha_recado(id && *id ? id : texto_de(x, "titulo"));
+    if (i < 0) {
+        if (n_rec == MAX_RECADOS) tira_recado(0);         // cheio: sai o mais antigo
+        i = n_rec++;
+        memset(&recados[i], 0, sizeof recados[i]);
+    }
+    le_recado(&recados[i], x);
+    if (!recados[i].titulo[0]) tira_recado(i);
+}
+
+// ---- o pomodoro ----
+static void vai_para_tela(int t)
+{
+    if (t < 0 || t >= N_TELAS || t == tela_atual) return;
+    lv_tileview_set_tile_by_index(tv, t, 0, LV_ANIM_OFF);
+    ev_troca_tela(NULL);
+}
+
+static int numero(cJSON *o, const char *chave, int min, int max, int padrao)
+{
+    cJSON *x = cJSON_GetObjectItemCaseSensitive(o, chave);
+    if (!cJSON_IsNumber(x)) return padrao;
+    int v = x->valueint;
+    return v < min ? min : v > max ? max : v;
+}
+
+static void aplica_pomodoro(cJSON *p)
+{
+    const char *acao = texto_de(p, "acao");
+    if (!acao) return;
+    if (!strcmp(acao, "iniciar")) {
+        const char *t = texto_de(p, "tarefa");
+        if (t && *t) copia_limpo(tarefa_atual, sizeof tarefa_atual, t);
+        pausa.rodando = false;
+        foco.total = foco.resto = numero(p, "minutos", 1, 180, pomo.foco) * 60;
+        foco.rodando = true;
+        passo = P_FOCO;
+        avisa_foco_inicio();                     // igual ao "Começar": as falas do zero
+        vai_para_tela(T_FOCO);
+    } else if (!strcmp(acao, "pausar")) {
+        foco.rodando = pausa.rodando = false;
+    } else if (!strcmp(acao, "continuar")) {
+        if (passo == P_FOCO) foco.rodando = true;
+        else if (passo == P_PAUSA) pausa.rodando = true;
+    } else if (!strcmp(acao, "parar")) {         // como o botão "Parar": volta para a lista
+        foco.rodando = pausa.rodando = false;
+        foco.resto = foco.total = pomo.foco * 60;
+        for (int i = 0; i < G_TOTAL; i++) descarta_guardada(i);
+        passo = P_ESCOLHER;
+    } else if (!strcmp(acao, "config")) {
+        pomo.foco   = numero(p, "foco",   AJUSTE[0].min, AJUSTE[0].max, pomo.foco);
+        pomo.curta  = numero(p, "curta",  AJUSTE[1].min, AJUSTE[1].max, pomo.curta);
+        pomo.blocos = numero(p, "blocos", AJUSTE[2].min, AJUSTE[2].max, pomo.blocos);
+        pomo.longa  = numero(p, "longa",  AJUSTE[3].min, AJUSTE[3].max, pomo.longa);
+        pomo_guarda();
+        if (!foco.rodando && foco.resto == foco.total) foco.resto = foco.total = pomo.foco * 60;
+        if (foco.bloco > pomo.blocos) foco.bloco = 1;
+    }
+}
+
+// ---- tudo junto ----
+static void aplica(cJSON *p)
+{
+    bool guardar = false;
+    cJSON *x;
+    if (cJSON_IsObject(x = cJSON_GetObjectItemCaseSensitive(p, "tarefas"))) {
+        cJSON *m = cJSON_GetObjectItemCaseSensitive(x, "missao"), *b = cJSON_GetObjectItemCaseSensitive(x, "bonus");
+        if (cJSON_IsArray(m)) { n_m = le_lista(missao, MAX_MISSAO, n_m, m); cortada = false; }
+        if (cJSON_IsArray(b)) n_b = le_lista(bonus, MAX_BONUS, n_b, b);
+        guardar = true;
+    }
+    if (cJSON_IsObject(x = cJSON_GetObjectItemCaseSensitive(p, "marcar"))) { aplica_marcar(x); guardar = true; }
+    // ~5 KB de cópia: na pilha da tarefa da tela não cabe, e estática tira RAM interna.
+    recado_t *antes;
+    if (cJSON_IsArray(x = cJSON_GetObjectItemCaseSensitive(p, "recados")) &&
+        (antes = na_psram(MAX_RECADOS, sizeof *antes))) {
+        int n_antes = n_rec;
+        memcpy(antes, recados, sizeof *antes * MAX_RECADOS);
+        n_rec = 0;
+        cJSON *r;
+        cJSON_ArrayForEach(r, x) {
+            if (n_rec >= MAX_RECADOS || !cJSON_IsObject(r)) continue;
+            const char *id = texto_de(r, "id");
+            recado_t *novo = &recados[n_rec];
+            memset(novo, 0, sizeof *novo);
+            for (int i = 0; id && *id && i < n_antes; i++)
+                if (!strcmp(antes[i].id, id)) *novo = antes[i];   // guarda o "visto"
+            le_recado(novo, r);
+            if (novo->titulo[0]) n_rec++;
+        }
+        free(antes);
+        recado_atual = 0;
+        guardar = true;
+    }
+    if (cJSON_IsObject(x = cJSON_GetObjectItemCaseSensitive(p, "recado"))) {
+        poe_recado(x);
+        guardar = true;
+    }
+    if (cJSON_IsString(x = cJSON_GetObjectItemCaseSensitive(p, "recado_apagar"))) {
+        tira_recado(acha_recado(x->valuestring));
+        guardar = true;
+    }
+    x = cJSON_GetObjectItemCaseSensitive(p, "humor");
+    if (cJSON_IsString(x)) humor_do_hermes(x->valuestring, 60);
+    else if (cJSON_IsObject(x)) humor_do_hermes(texto_de(x, "nome"), numero(x, "minutos", 1, 24 * 60, 60));
+    if (cJSON_IsObject(x = cJSON_GetObjectItemCaseSensitive(p, "fala")))
+        lylu_fala(texto_de(x, "text"), texto_de(x, "forte"), NULL, 0);
+    if (cJSON_IsObject(x = cJSON_GetObjectItemCaseSensitive(p, "pomodoro"))) aplica_pomodoro(x);
+    if (cJSON_IsString(x = cJSON_GetObjectItemCaseSensitive(p, "tela")))
+        for (int i = 0; i < N_TELAS; i++)
+            if (!strcasecmp(x->valuestring, NOME_TELA[i])) vai_para_tela(i);
+    if (cJSON_IsBool(x = cJSON_GetObjectItemCaseSensitive(p, "dificil"))) {
+        dificil = cJSON_IsTrue(x);
+        if (!dificil) cortada = false;
+    }
+    if (guardar) guarda_hermes();
+}
+
+static uint32_t soma_fnv(const char *s);
+
+static void recebe(entrada_t *e)
+{
+    ESP_LOGI(TAG, "chegou do Hermes: %s, voz de %u ms: %.120s", e->kind,
+             (unsigned)(e->amostras * 1000 / 16000), e->payload);
+    cJSON *p = cJSON_Parse(e->payload);
+    free(e->payload);
+    if (!p) { free(e->audio); return; }
+    if (!strcmp(e->kind, "chat")) {
+        // Fala para guardar e tocar no zero do pomodoro (ver "falas guardadas").
+        const char *tocar = texto_de(p, "tocar");
+        int g = !tocar ? -1 : !strcmp(tocar, "foco_fim") ? G_FOCO_FIM : !strcmp(tocar, "pausa_fim") ? G_PAUSA_FIM : -1;
+        if (g >= 0) {
+            ESP_LOGI(TAG, "fala guardada para o %s (%u ms de voz)", tocar, (unsigned)(e->amostras * 1000 / 16000));
+            guarda_fala(g, texto_de(p, "text"), texto_de(p, "forte"), e->audio, e->amostras);
+            cJSON_Delete(p);
+            return;
+        }
+        // A mesma fala duas vezes em seguida sai uma vez só: o Hermes às vezes
+        // responde e também manda a frase pela ferramenta "falar". A resposta que
+        // a Conversa está esperando passa sempre — "não consegui te ouvir" pode
+        // vir igual duas vezes, e é resposta nova.
+        static uint32_t ultima_soma;
+        static int64_t ultima_quando;
+        const char *texto = texto_de(p, "text");
+        uint32_t soma = texto ? soma_fnv(texto) : 0;
+        bool esperada = e->minha && (cv_passo == CV_PENSANDO || cv_passo == CV_ENVIANDO);
+        if (!esperada && soma && soma == ultima_soma && agora_ms() - ultima_quando < 120000) {
+            ESP_LOGI(TAG, "fala repetida do Hermes, ignorada");
+            free(e->audio);
+            cJSON_Delete(p);
+            return;
+        }
+        ultima_soma = soma;
+        ultima_quando = agora_ms();
+        const char *humor = texto_de(p, "humor");
+        if (humor) humor_do_hermes(humor, 60);
+        if (esperada) cv_respondeu(texto_de(p, "text"), texto_de(p, "transcricao"));
+        lylu_fala(texto_de(p, "text"), texto_de(p, "forte"), e->audio, e->amostras);
+    } else {
+        free(e->audio);
+        aplica(p);
+    }
+    cJSON_Delete(p);
+}
+
+static void recebe_do_hermes(void)
+{
+    entrada_t e;
+    bool algum = false;
+    while (caixa_entrada && xQueueReceive(caixa_entrada, &e, 0) == pdTRUE) { recebe(&e); algum = true; }
+    if (algum) atualizar();
+}
+
+// resposta_em_ms > 0: aviso em que o Hermes fala (a pausa do pomodoro); a ponte
+// busca a resposta nesse tempo (ver ponte_enviar_evento).
+static void avisa_hermes_em(cJSON *ev, int resposta_em_ms)
+{
+    char *s = cJSON_PrintUnformatted(ev);
+    cJSON_Delete(ev);
+    if (s && !ponte_enviar_evento(s, resposta_em_ms)) ESP_LOGW(TAG, "aviso para o Hermes ficou de fora: %.80s", s);
+    free(s);
+}
+
+static void avisa_hermes(cJSON *ev) { avisa_hermes_em(ev, 0); }
+
+// ---- guardado na NVS ----
+// O que o Hermes mandou (e o que ela marcou por cima) sobrevive a uma queda de
+// energia: sem isso, a placa voltaria mostrando as tarefas de exemplo.
+#define NVS_HERMES "hermes"
+
+static cJSON *tarefas_json(tarefa_t *lista, int n)
+{
+    cJSON *a = cJSON_CreateArray();
+    for (int i = 0; i < n; i++) {
+        cJSON *t = cJSON_CreateObject();
+        if (lista[i].id[0]) cJSON_AddStringToObject(t, "id", lista[i].id);
+        cJSON_AddStringToObject(t, "t", lista[i].t);
+        cJSON_AddBoolToObject(t, "f", lista[i].f);
+        cJSON_AddItemToArray(a, t);
+    }
+    return a;
+}
+
+static cJSON *recados_json(bool para_guardar)
+{
+    cJSON *a = cJSON_CreateArray();
+    for (int i = 0; i < n_rec; i++) {
+        recado_t *r = &recados[i];
+        cJSON *o = cJSON_CreateObject();
+        struct { const char *k, *v; } campos[] = {
+            { "id", r->id }, { "quando", r->quando }, { "dia", r->dia }, { "hora", r->hora },
+            { "titulo", r->titulo }, { "detalhe", r->detalhe }, { "tipo", r->tipo },
+            { "fala", r->fala }, { "forte", r->fala_forte },
+        };
+        for (size_t k = 0; k < sizeof campos / sizeof *campos; k++)
+            if (campos[k].v[0] && (para_guardar || k < 6)) cJSON_AddStringToObject(o, campos[k].k, campos[k].v);
+        cJSON_AddBoolToObject(o, "visto", r->visto);
+        cJSON_AddItemToArray(a, o);
+    }
+    return a;
+}
+
+static void guarda_hermes(void)
+{
+    cJSON *o = cJSON_CreateObject();
+    cJSON *t = cJSON_AddObjectToObject(o, "tarefas");
+    cJSON_AddItemToObject(t, "missao", tarefas_json(missao, n_m));
+    cJSON_AddItemToObject(t, "bonus", tarefas_json(bonus, n_b));
+    cJSON_AddItemToObject(o, "recados", recados_json(true));
+    char *s = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    nvs_handle_t h;
+    if (s && nvs_open("lylu", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, NVS_HERMES, s, strlen(s));
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    free(s);
+}
+
+// Até 28/10/2026 a placa vinha com tarefas e um recado de exemplo, e marcar um
+// deles gravava tudo na NVS como se fosse de verdade. Uma vez só, tira os que
+// ficaram guardados; depois disso, o mesmo texto vindo do Hermes é dele e fica.
+#define NVS_SEM_EXEMPLOS "sem_exemplos"
+static const char *EXEMPLOS[] = { "Enviar orçamento pro cliente", "Tomar o remédio", "Responder os e-mails",
+                                  "Organizar a mesa", "Ler o capítulo 3", "Lavar a louça" };
+
+static bool e_exemplo(const tarefa_t *t)
+{
+    if (t->id[0]) return false;                     // com id do Todoist é de verdade
+    for (size_t j = 0; j < sizeof EXEMPLOS / sizeof *EXEMPLOS; j++)
+        if (!strcmp(t->t, EXEMPLOS[j])) return true;
+    return false;
+}
+
+static int sem_exemplos(tarefa_t *lista, int n)
+{
+    int k = 0;
+    for (int i = 0; i < n; i++)
+        if (!e_exemplo(&lista[i])) lista[k++] = lista[i];
+    return k;
+}
+
+static void tira_exemplos_guardados(void)
+{
+    nvs_handle_t h;
+    uint8_t feito = 0;
+    if (nvs_open("lylu", NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_get_u8(h, NVS_SEM_EXEMPLOS, &feito) != ESP_OK || !feito) {
+        int antes = n_m + n_b + n_rec;
+        n_m = sem_exemplos(missao, n_m);
+        n_b = sem_exemplos(bonus, n_b);
+        int i = acha_recado("Postar a placa nos Correios");
+        if (i >= 0 && !recados[i].id[0]) tira_recado(i);
+        if (n_m + n_b + n_rec != antes) {
+            ESP_LOGI(TAG, "tirei %d exemplos que tinham ficado guardados", antes - (n_m + n_b + n_rec));
+            guarda_hermes();
+        }
+        nvs_set_u8(h, NVS_SEM_EXEMPLOS, 1);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+}
+
+static void carrega_hermes(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("lylu", NVS_READONLY, &h) == ESP_OK) {         // nunca recebeu nada: tudo vazio
+        size_t n = 0;
+        char *s = NULL;
+        if (nvs_get_blob(h, NVS_HERMES, NULL, &n) == ESP_OK && n && (s = malloc(n + 1)) &&
+            nvs_get_blob(h, NVS_HERMES, s, &n) == ESP_OK) {
+            s[n] = 0;
+            cJSON *o = cJSON_Parse(s);
+            if (o) {
+                aplica(o);
+                cJSON_Delete(o);
+            }
+        }
+        free(s);
+        nvs_close(h);
+    }
+    tira_exemplos_guardados();
+}
+
+// ---- o retrato da tela, para o Hermes ----
+// Vai a cada mudança, mas não a cada toque: espera 2 s quieta e só manda se
+// mudou de verdade (o tempo do relógio do foco não conta, senão iria sempre).
+static bool relatorio_sujo;
+static int64_t relatorio_quando;
+static uint32_t relatorio_soma;
+
+static const char *humor(lv_color_t *cor);
+static const char *NOME_PASSO[] = { "escolher", "configurar", "foco", "pausa" };
+
+static void relatar(void)
+{
+    relatorio_sujo = true;
+    relatorio_quando = agora_ms();
+}
+
+static uint32_t soma_fnv(const char *s)
+{
+    uint32_t h = 2166136261u;
+    while (*s) h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h;
+}
+
+static void manda_relatorio(bool sempre)
+{
+    relatorio_sujo = false;
+    lv_color_t cor;
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddStringToObject(o, "tela", NOME_TELA[tela_atual]);
+    cJSON_AddStringToObject(o, "humor", humor(&cor));
+    cJSON_AddBoolToObject(o, "dificil", dificil);
+    cJSON_AddBoolToObject(o, "silencio_foco", silencio_foco);
+    cJSON_AddStringToObject(o, "ligou_por", ligou_por);      // reinício sozinha: energia ou erro?
+    // O que ela sabe tocar: o lylu_placa.py olha isto antes de mandar voz em ADPCM.
+    cJSON *fmts = cJSON_AddArrayToObject(o, "audio_formatos");
+    cJSON_AddItemToArray(fmts, cJSON_CreateString("pcm_s16le_16000"));
+    cJSON_AddItemToArray(fmts, cJSON_CreateString("ima_adpcm_16000"));
+    cJSON_AddItemToObject(o, "missao", tarefas_json(missao, n_missao()));
+    cJSON_AddBoolToObject(o, "missao_cortada", cortada && n_m > 1);
+    cJSON_AddItemToObject(o, "bonus", tarefas_json(bonus, n_b));
+    cJSON_AddItemToObject(o, "recados", recados_json(false));
+    cJSON *pm = cJSON_AddObjectToObject(o, "pomodoro");
+    cJSON_AddStringToObject(pm, "passo", NOME_PASSO[passo]);
+    cJSON_AddBoolToObject(pm, "rodando", foco.rodando || pausa.rodando);
+    cJSON_AddStringToObject(pm, "tarefa", tarefa_atual);
+    cJSON_AddNumberToObject(pm, "bloco", foco.bloco);
+    cJSON_AddNumberToObject(pm, "blocos", pomo.blocos);
+    cJSON_AddNumberToObject(pm, "feitos_hoje", foco.feitos);
+    cJSON_AddNumberToObject(pm, "foco_min", pomo.foco);
+    cJSON_AddNumberToObject(pm, "curta_min", pomo.curta);
+    cJSON_AddNumberToObject(pm, "longa_min", pomo.longa);
+    char *s = cJSON_PrintUnformatted(o);
+    uint32_t soma = s ? soma_fnv(s) : 0;
+    free(s);
+    if (!sempre && soma == relatorio_soma) { cJSON_Delete(o); return; }
+    relatorio_soma = soma;
+    // O que muda a cada segundo entra depois da comparação.
+    cJSON_AddNumberToObject(pm, "resto_s", passo == P_PAUSA ? pausa.resto : foco.resto);
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char hora[24];
+    strftime(hora, sizeof hora, "%Y-%m-%dT%H:%M", &tm);
+    cJSON_AddStringToObject(o, "hora_da_placa", hora);
+    s = cJSON_PrintUnformatted(o);
+    cJSON_Delete(o);
+    if (s) ponte_relatar(s);
+    free(s);
+}
+
+static void olha_relatorio(void)
+{
+    static int64_t ultimo;
+    int64_t agora = agora_ms();
+    // Sem ponte, espera: mandar agora perderia o retrato (e a soma diria que já foi).
+    if (!ponte_online()) return;
+    if (relatorio_sujo && agora - relatorio_quando > 2000) { manda_relatorio(false); ultimo = agora; }
+    else if (agora - ultimo > 10 * 60000) { manda_relatorio(true); ultimo = agora; }   // de 10 em 10 min, mesmo quieta
+}
+
+// ---------------------------------------------------------------- CONVERSA
+// Toca em "Falar" (na barra de cima, em qualquer tela): ela escuta até você tocar
+// em "Enviar", manda para o Hermes e responde em voz alta. Fica por cima de tudo,
+// como a tela do microfone.
+//
+// Parar sozinha no silêncio foi a primeira ideia, e a Noemi pediu para tirar
+// (28/10/2026): uma pausa para pensar no meio da frase cortava a fala dela.
+static lv_obj_t *cv_tela, *cv_status, *cv_voce, *cv_btn, *cv_btn_txt, *cv_dica, *cv_balao, *cv_barra[MF_BARRAS];
+static int64_t cv_desde;
+static char cv_texto[FALA_MAX + 4], cv_ouvido[204];
+static const char *cv_erro;
+
+#define CV_MAX_MS 30000          // passou disso, manda sozinha (a ponte aceita até ~40 s)
+#define CV_ESPERA_MS 90000       // o Hermes não respondeu nesse tempo: avisa
+
+static void cv_mostra(cv_passo_t p)
+{
+    cv_passo = p;
+    cv_desde = agora_ms();
+    atualizar();
+}
+
+static void cv_falha(const char *motivo)
+{
+    cv_erro = motivo;
+    cv_mostra(CV_ERRO);
+}
+
+static void cv_comeca(void)
+{
+    cv_subiu = cv_falhou = false;
+    cv_ouvido[0] = cv_texto[0] = 0;
+    audio_calar();
+    if (!audio_escutando()) { cv_falha("Meu microfone não subiu dessa vez."); return; }
+    if (!ponte_configurada()) { cv_falha("Falta meu token de pareamento com o Hermes."); return; }
+    if (!ponte_online()) { cv_falha("Tô sem falar com o Hermes agora. Olha o Wi-Fi?"); return; }
+    if (!audio_gravar(CV_MAX_MS)) { cv_falha("Faltou memória pra gravar. Tenta de novo?"); return; }
+    cv_mostra(CV_OUVINDO);
+}
+
+// O fim da gravação é o dedo batendo no "Enviar": o microfone, na mesma placa,
+// ouve a pancada, e o whisper inventava palavras nela ("virou futebol").
+#define CV_CORTE_FIM (16000 * 300 / 1000)
+
+static void cv_envia(void)
+{
+    bool no_botao = audio_gravando();          // parou sozinha nos 30 s: não teve toque
+    audio_parar_gravacao();
+    bool ouviu = audio_ouviu_fala();
+    size_t n;
+    int16_t *pcm = audio_pega_gravacao(&n);
+    if (no_botao && n > CV_CORTE_FIM) n -= CV_CORTE_FIM;
+    if (!pcm || n < 16000 / 2) { free(pcm); cv_falha("Foi rapidinho demais. Fala de novo?"); return; }
+    if (!ouviu) { free(pcm); cv_falha("Não ouvi nada. Fala pertinho de mim?"); return; }
+    if (!ponte_enviar_voz(pcm, n)) { cv_falha("A fila da ponte tá cheia. Tenta já já."); return; }
+    cv_mostra(CV_ENVIANDO);
+}
+
+static void cv_fecha(void)
+{
+    if (cv_passo == CV_OUVINDO) { size_t n; free(audio_pega_gravacao(&n)); }
+    cv_passo = CV_FECHADA;
+    lv_obj_add_flag(cv_tela, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(caixa_pontos, LV_OBJ_FLAG_HIDDEN);
+    atualizar();
+}
+
+static void cv_respondeu(const char *texto, const char *transcricao)
+{
+    copia_limpo(cv_texto, sizeof cv_texto, texto);
+    copia_limpo(cv_ouvido, sizeof cv_ouvido, transcricao);
+    cv_mostra(CV_RESPONDEU);
+}
+
+static void ev_falar(lv_event_t *e)
+{
+    if (cv_passo == CV_OUVINDO) { cv_envia(); return; }    // tocar de novo = enviar
+    if (mf_aberta) ev_mic_fecha(NULL);
+    if (wf_aberta) ev_wifi_fecha(NULL);
+    lv_obj_remove_flag(cv_tela, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(caixa_pontos, LV_OBJ_FLAG_HIDDEN);
+    cv_comeca();
+}
+
+static void ev_cv_btn(lv_event_t *e)
+{
+    if (cv_passo == CV_OUVINDO) cv_envia();
+    else if (cv_passo == CV_RESPONDEU || cv_passo == CV_ERRO) cv_comeca();
+}
+
+static void ev_cv_fecha(lv_event_t *e) { audio_calar(); cv_fecha(); }
+
+static void atualiza_conversa(void)
+{
+    static const char *STATUS[] = { "", "ouvindo", "enviando", "pensando", "", "" };
+    lv_label_set_text(cv_status, STATUS[cv_passo]);
+    bool ouvindo = cv_passo == CV_OUVINDO;
+    if (!ouvindo) for (int i = 0; i < MF_BARRAS; i++) lv_obj_set_style_bg_color(cv_barra[i], C_LINHA, 0);
+
+    char s[240];
+    if (cv_ouvido[0]) { snprintf(s, sizeof s, "Você disse: “%s”", cv_ouvido); lv_label_set_text(cv_voce, s); }
+    else lv_label_set_text(cv_voce, "");
+
+    bool botao = cv_passo == CV_OUVINDO || cv_passo == CV_RESPONDEU || cv_passo == CV_ERRO;
+    if (botao) lv_obj_remove_flag(cv_btn, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(cv_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(cv_btn_txt, ouvindo ? "Enviar" : cv_passo == CV_ERRO ? "Tentar de novo" : "Falar de novo");
+
+    switch (cv_passo) {
+    case CV_OUVINDO:
+        balao_fala(cv_balao, "Estou te ouvindo…", "Quando terminar, toca em Enviar.");
+        lv_label_set_text(cv_dica, "Fala perto da placa. Até 30 segundos.");
+        break;
+    case CV_ENVIANDO:
+        balao_fala(cv_balao, "Recebi! Mandando pro Hermes…", NULL);
+        lv_label_set_text(cv_dica, "Leva uns segundinhos.");
+        break;
+    case CV_PENSANDO:
+        balao_fala(cv_balao, "Pensando na resposta…", NULL);
+        lv_label_set_text(cv_dica, "Leva uns segundinhos.");
+        break;
+    case CV_RESPONDEU:
+        balao_fala(cv_balao, cv_texto[0] ? cv_texto : "…", NULL);
+        lv_label_set_text(cv_dica, "");
+        break;
+    default:
+        balao_fala(cv_balao, cv_erro ? cv_erro : "Algo deu errado.", NULL);
+        lv_label_set_text(cv_dica, "");
+        break;
+    }
+    lylu_em(cv_tela, 690, 100);
+    lylu_mostra(A_RECADOS);
+}
+
+// O ritmo da conversa: a barra de som, parar sozinha, e os avisos da ponte.
+static void passo_conversa(lv_timer_t *t)
+{
+    if (cv_falhou) { cv_falhou = false; if (cv_passo == CV_ENVIANDO) cv_falha(cv_motivo); }
+    if (cv_subiu) { cv_subiu = false; if (cv_passo == CV_ENVIANDO) cv_mostra(CV_PENSANDO); }
+    int64_t tempo = agora_ms() - cv_desde;
+    switch (cv_passo) {
+    case CV_OUVINDO: {
+        int acesos = audio_nivel() * MF_BARRAS / 100;
+        for (int i = 0; i < MF_BARRAS; i++)
+            lv_obj_set_style_bg_color(cv_barra[i], i < acesos ? (i < MF_BARRAS - 4 ? C_OLIVA : C_AMBAR) : C_LINHA, 0);
+        if (!audio_gravando()) cv_envia();      // chegou nos 30 s
+        break;
+    }
+    case CV_ENVIANDO:
+    case CV_PENSANDO: {
+        if (tempo > CV_ESPERA_MS) { cv_falha("O Hermes não respondeu dessa vez. Tenta de novo?"); break; }
+        // Os pontinhos andando no "pensando": sem eles, parece que ela travou.
+        static const char *PONTOS[] = { "", ".", "..", "..." };
+        static int antes = -1;
+        int agora = (int)(tempo / 400) % 4;
+        if (agora != antes) {
+            char s[24];
+            snprintf(s, sizeof s, "%s%s", cv_passo == CV_PENSANDO ? "pensando" : "enviando", PONTOS[agora]);
+            lv_label_set_text(cv_status, s);
+            antes = agora;
+        }
+        break;
+    }
+    case CV_RESPONDEU:
+        // Terminou de falar e ela já teve tempo de ler: volta para a tela de antes.
+        if (!audio_falando() && tempo > 15000) cv_fecha();
+        break;
+    default: break;
+    }
+}
+
+static void cria_conversa(void)
+{
+    cv_tela = caixa(lv_layer_top());
+    lv_obj_set_size(cv_tela, TELA_W, WF_ALTURA);
+    lv_obj_set_pos(cv_tela, 0, WF_TOPO);
+    lv_obj_set_style_bg_color(cv_tela, C_FUNDO, 0);
+    lv_obj_set_style_bg_opa(cv_tela, LV_OPA_COVER, 0);
+    lv_obj_add_flag(cv_tela, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(cv_tela, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *voltar = botao(cv_tela, "Fechar", false, ev_cv_fecha);
+    lv_obj_set_pos(voltar, 34, 12);
+    lv_obj_t *tit = texto(cv_tela, "Conversa", f_px_m, C_TINTA);
+    lv_obj_set_pos(tit, 196, 18);
+    cv_status = texto(cv_tela, "", f_corpo, C_AMBAR);
+    lv_obj_set_pos(cv_status, 430, 30);
+
+    lv_obj_t *caixa_barra = caixa(cv_tela);
+    lv_obj_set_pos(caixa_barra, 50, 130);
+    lv_obj_set_flex_flow(caixa_barra, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(caixa_barra, 8, 0);
+    for (int i = 0; i < MF_BARRAS; i++) {
+        cv_barra[i] = caixa(caixa_barra);
+        lv_obj_set_size(cv_barra[i], 30, 80);
+        lv_obj_set_style_radius(cv_barra[i], 8, 0);
+        lv_obj_set_style_bg_color(cv_barra[i], C_LINHA, 0);
+        lv_obj_set_style_bg_opa(cv_barra[i], LV_OPA_COVER, 0);
+    }
+
+    cv_voce = texto(cv_tela, "", f_corpo, C_FRACO);
+    lv_obj_set_pos(cv_voce, 50, 250);
+    lv_obj_set_width(cv_voce, 560);
+    lv_label_set_long_mode(cv_voce, LV_LABEL_LONG_WRAP);
+
+    cv_btn = botao(cv_tela, "Enviar", true, ev_cv_btn);
+    lv_obj_set_pos(cv_btn, 50, 400);
+    cv_btn_txt = lv_obj_get_child(cv_btn, 0);
+    cv_dica = texto(cv_tela, "", f_corpo_p, C_FRACO);
+    lv_obj_set_pos(cv_dica, 50, 470);
+
+    cv_balao = balao(cv_tela, 640, 20, 250);
 }
 
 // ---------------------------------------------------------------- humor e atualização geral
 static const char *humor(lv_color_t *cor)
 {
+    // O humor que o Hermes escolheu vale por um tempo — menos as cutucadas no dia
+    // difícil, que a personalidade dela não permite.
+    if (h_humor_ate > agora_ms() && !(dificil && (!strcmp(h_humor, "julgadora") || !strcmp(h_humor, "alertando")))) {
+        *cor = cor_do_humor(h_humor);
+        return h_humor;
+    }
     if (dificil) { *cor = C_CEU; return "cuidadora"; }
     if (tela_atual == T_FOCO) {
         switch (passo) {
@@ -2473,18 +3537,36 @@ static void atualizar(void)
     case T_AJUSTES: atualiza_ajustes(); break;
     }
 
+    relatar();               // o Hermes fica sabendo (manda só se mudou; ver HERMES)
+    if (cv_passo != CV_FECHADA) { atualiza_conversa(); return; }
     if (wf_aberta) { atualiza_wifi(); return; }
     if (mf_aberta) { atualiza_microfone(); return; }
 
     switch (tela_atual) {
     // Os quadros são 300x450 com uns 53 px de folga embaixo: y + 397 é o pé dela.
-    case T_FOCO:    lylu_na_tela(T_FOCO, 690, 154); lylu_mostra(anim_foco()); break;   // sentada na mesa
+    case T_FOCO:    lylu_esconde(); break;  // a aba Foco é só o trabalho e o relógio
     case T_TAREFAS: lylu_na_tela(T_TAREFAS, 40, 120); lylu_mostra(A_TAREFAS); break;
     case T_RECADOS: lylu_na_tela(T_RECADOS, 672, 140); lylu_mostra(A_RECADOS); break;
     case T_SEMANA:  lylu_na_tela(T_SEMANA, 672, 154); lylu_mostra(A_SEMANA); break;
     case T_RELOGIO: lylu_na_tela(T_RELOGIO, 672, 130); lylu_mostra(A_RELOGIO); break;
     case T_CASA:    lylu_na_tela(T_CASA, 600, 123); lylu_mostra(A_QUARTO); break;     // em cima do tapete
     case T_AJUSTES: lylu_na_tela(T_AJUSTES, 672, 140); lylu_mostra(A_AJUSTES); break;
+    }
+}
+
+// O balão da tela à vista: é nele que a fala do Hermes aparece. Com a conversa,
+// o Wi-Fi ou o microfone por cima, nenhum (essas telas têm a fala delas).
+static lv_obj_t *balao_da_vez(void)
+{
+    if (cv_passo != CV_FECHADA || wf_aberta || mf_aberta) return NULL;
+    switch (tela_atual) {
+    case T_FOCO:    return NULL;            // a aba Foco não tem balão (nem a Lylu)
+    case T_TAREFAS: return tar_balao;
+    case T_RECADOS: return rec_balao;
+    case T_SEMANA:  return sem_balao;
+    case T_RELOGIO: return rel_balao;
+    case T_CASA:    return casa_balao;
+    default:        return aj_balao;
     }
 }
 
@@ -2501,6 +3583,7 @@ static void ev_troca_tela(lv_event_t *e)
 // escondida, conta no log o estado em que ela estava e a põe de volta.
 static void vigia_lylu(void)
 {
+    if (lylu_fora) return;                       // escondida de propósito (a aba Foco)
     lv_gif_t *g = (lv_gif_t *)lylu;
     bool sem_gif = !g->gif, escondida = lv_obj_has_flag(lylu, LV_OBJ_FLAG_HIDDEN);
     if (!sem_gif && !escondida) return;
@@ -2519,10 +3602,21 @@ static void tique(lv_timer_t *t)
     atualiza_hora();
     vigia_lylu();
     static int seg;
-    if (++seg % 300 == 0) loga_memoria("a cada 5 min");
+    // Depois de um reinício sozinha, a porta USB volta tarde e o log perde a linha
+    // do boot: repete aos 30 s, quando quem estava lendo já reabriu.
+    if (++seg == 30) ESP_LOGW(TAG, "ligou por: %s (repetido para quem abriu o log agora)", ligou_por);
+    if (seg % 300 == 0) loga_memoria("a cada 5 min");
     if (foco.rodando && --foco.resto <= 0) fim_do_foco();
-    else if (pausa.rodando && --pausa.resto <= 0) fim_da_pausa();
+    else if (pausa.rodando && --pausa.resto <= 0) fim_da_pausa(false);
     else if (tela_atual == T_FOCO) tique_pomodoro();
+
+    // A fala e o humor do Hermes venceram: a tela volta ao jeito dela.
+    static bool fala_valia, humor_valia;
+    bool fala = h_fala_ate > agora_ms(), hum = h_humor_ate > agora_ms();
+    if ((fala_valia && !fala) || (humor_valia && !hum)) atualizar();
+    fala_valia = fala;
+    humor_valia = hum;
+    olha_relatorio();
 }
 
 // ---------------------------------------------------------------- hora inicial
@@ -2553,9 +3647,11 @@ void app_main(void)
                                     "QUEDA DE TENSAO (brownout)", "SDIO", "USB", "JTAG", "eFuse",
                                     "falha de energia", "CPU travada" };
     esp_reset_reason_t r = esp_reset_reason();
-    ESP_LOGW(TAG, "ligou por: %s (%d)", r < sizeof MOTIVO / sizeof *MOTIVO ? MOTIVO[r] : "?", (int)r);
+    ligou_por = r < sizeof MOTIVO / sizeof *MOTIVO ? MOTIVO[r] : "?";
+    ESP_LOGW(TAG, "ligou por: %s (%d)", ligou_por, (int)r);
 
     acerta_hora_inicial();
+    cria_listas();
     placa_iniciar();
     carrega_gifs();
 
@@ -2586,6 +3682,7 @@ void app_main(void)
     cria_ajustes(tiles[T_AJUSTES]);
     cria_wifi();
     cria_microfone();
+    cria_conversa();
     cria_digitar();
 
     lylu = lv_gif_create(tiles[T_FOCO]);
@@ -2601,17 +3698,21 @@ void app_main(void)
     atualizar();
     lv_timer_create(tique, 1000, NULL);
     lv_timer_create(passo_microfone, 60, NULL);
+    lv_timer_create(passo_conversa, 60, NULL);
     lv_timer_create(sinal_pinta, 350, NULL);
     lv_timer_create(olha_rede, 200, NULL);
     placa_destrava();
 
+    caixa_entrada = xQueueCreate(8, sizeof(entrada_t));
     audio_iniciar();         // ES8311: se não responder, ela segue surda e nada quebra
     rede_iniciar(ev_rede);   // demora uns segundos e pode não achar o C6; a tela já está de pé
+    // Os tempos do pomodoro e o que o Hermes mandou moram na NVS, e quem abre a
+    // NVS é a rede. Abrir antes dela, no começo do app_main, derrubava o DHCP:
+    // associava na rede e o IP nunca chegava (três boots seguidos; só mudar isto
+    // de lugar resolveu). E vem antes da ponte, para o primeiro retrato que ela
+    // mandar ao Hermes já ser o de verdade.
+    if (placa_trava()) { pomo_carrega(); carrega_hermes(); atualizar(); placa_destrava(); }
     ponte_iniciar(ev_ponte); // só o token estreito da placa; nenhuma chave do Hermes fica aqui
-    // Os tempos do pomodoro moram na NVS, e quem abre a NVS é a rede. Abrir
-    // antes dela, no começo do app_main, derrubava o DHCP: associava na rede e o
-    // IP nunca chegava (três boots seguidos; só mudar isto de lugar resolveu).
-    if (placa_trava()) { pomo_carrega(); atualizar(); placa_destrava(); }
 
     ESP_LOGI(TAG, "Lylu pronta");
 }

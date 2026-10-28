@@ -14,6 +14,8 @@
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "placa";
 
@@ -260,7 +262,14 @@ lv_display_t *placa_iniciar(void)
         ESP_LOGE(TAG, "toque GT911 não respondeu em 0x5D nem 0x14; seguindo sem toque");
     }
 
-    placa_brilho(95);
+    // A luz sobe aos poucos (~0,8 s) em vez de saltar de 0 a 95%. Toda vez que a
+    // placa caiu no boot (28/10/2026), foi logo depois daqui e com o motivo
+    // "ligou na tomada" — cara de queda de tensão na USB quando a luz de fundo
+    // acende de uma vez, não de erro no programa.
+    for (int b = 5; b <= 95; b += 5) {
+        placa_brilho(b);
+        vTaskDelay(pdMS_TO_TICKS(40));
+    }
     ESP_LOGI(TAG, "tela 1024x600 pronta");
     return disp;
 }

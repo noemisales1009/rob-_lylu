@@ -40,3 +40,18 @@ CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=20000
 # novas ligam por padrao e que o C6 antigo provavelmente nao fala.
 # Desligar custa um pouco de desempenho e nao encosta no C6.
 CONFIG_ESP_HOSTED_SDIO_OPTIMIZATION_RX_NONE=y
+
+# Janela do TCP. A padrao (5760 bytes) deixava a voz da conversa a ~30 KB/s:
+# manda 5,7 KB, para, espera a confirmacao do Supabase la longe, manda mais.
+# Medido em 28/10/2026: 205 KB levavam 6,7 s para subir e 203 KB, 6,1 s para
+# descer. Com 32 KB de janela cabe bem mais "em voo". Custa RAM interna so
+# durante a transferencia (havia 153 KB livres).
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=24576
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=32
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+
+# A ponte reaproveita a conexao com o Supabase (ponte.c). Quando ela cai e
+# precisa reabrir, o "ticket" da sessao do TLS deixa o aperto de mao curto,
+# sem refazer a conferencia do certificado.
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y

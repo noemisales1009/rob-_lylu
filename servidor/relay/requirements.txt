@@ -1,0 +1,4 @@
+# Fala → texto, no próprio servidor (baixa o modelo na primeira vez)
+faster-whisper>=1.0
+# Texto → fala (vozes neurais da Microsoft, sem chave). Precisa do ffmpeg instalado.
+edge-tts>=6.1
