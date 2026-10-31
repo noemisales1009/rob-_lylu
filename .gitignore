@@ -26,5 +26,10 @@ xiaozhi-esp32-lylu/
 # o molde sem segredo é o secrets.example.h.
 lylu_p4/main/secrets.h
 
+# O repositório é público. O APK leva a chave do app; o firmware gravado, o token
+# da placa; o despejo da flash, também a senha do Wi-Fi.
+*.apk
+output/lylu-fala-frontal/
+
 # Cache do Python
 __pycache__/

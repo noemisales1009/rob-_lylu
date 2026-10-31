@@ -145,6 +145,7 @@ static void nota(int16_t *buf, int n, float freq)
 typedef struct { int16_t *pcm; size_t n; } som_t;
 static QueueHandle_t fila_som;
 static volatile bool calar, falando;
+static volatile int abertura_boca;
 #define PEDACO (TAXA / 20)
 
 static void blip(int16_t *buf, int n, int pausa)
@@ -165,13 +166,26 @@ static void fala(void *p)
     for (;;) {
         som_t s;
         if (xQueueReceive(fila_som, &s, portMAX_DELAY) != pdTRUE) continue;
-        if (!s.pcm) { blip(buf, n, pausa); continue; }
+        if (!s.pcm) {
+            abertura_boca = 0;
+            blip(buf, n, pausa);
+            // A voz que acaba com um blip na fila deixa "falando" ligado: desliga aqui.
+            falando = uxQueueMessagesWaiting(fila_som) > 0;
+            continue;
+        }
         calar = false;
         falando = true;
         for (size_t i = 0; i < s.n && !calar; i += PEDACO) {
             size_t k = s.n - i < PEDACO ? s.n - i : PEDACO;
+            // Usa a voz de SAÍDA em janelas de 50 ms, inclusive o silêncio
+            // entre palavras. A UI lê apenas este nível, sem acessar o PCM.
+            int64_t energia = 0;
+            for (size_t j = 0; j < k; j++) energia += (int32_t)s.pcm[i + j] * s.pcm[i + j];
+            int rms = (int)sqrt((double)energia / k);
+            abertura_boca = rms < 160 ? 0 : rms < 800 ? 1 : rms < 1800 ? 2 : 3;
             esp_codec_dev_write(ouvido, s.pcm + i, k * sizeof *s.pcm);
         }
+        abertura_boca = 0;
         free(s.pcm);
         falando = uxQueueMessagesWaiting(fila_som) > 0;
     }
@@ -196,9 +210,11 @@ void audio_calar(void)
     som_t s;
     while (fila_som && xQueueReceive(fila_som, &s, 0) == pdTRUE) free(s.pcm);
     calar = true;
+    abertura_boca = 0;
 }
 
 bool audio_falando(void) { return falando; }
+int audio_boca(void) { return abertura_boca; }
 
 // ---------------------------------------------------------------- gravando
 bool audio_gravar(int max_ms)

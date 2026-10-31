@@ -1,0 +1,3 @@
+node_modules/
+# Copiado de lylu_app pelo copia.mjs a cada "npm run gerar".
+app/compartilhado/

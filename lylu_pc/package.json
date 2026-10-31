@@ -1,0 +1,16 @@
+{
+  "name": "lylu-foco",
+  "productName": "Lylu Foco",
+  "private": true,
+  "version": "0.1.0",
+  "description": "O Pomodoro da Lylu no PC: ela fica num canto da tela, sempre por cima, com o relógio.",
+  "main": "app/main.js",
+  "scripts": {
+    "start": "node copia.mjs && electron .",
+    "gerar": "node gerar.mjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "electron": "44.7.0"
+  }
+}

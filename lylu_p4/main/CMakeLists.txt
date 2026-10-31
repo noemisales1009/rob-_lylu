@@ -1,3 +1,5 @@
+# Quatro ações da conversa (frente, escuta, pensamento e lembrete).
+# As animações antigas por tela continuam fora.
 file(GLOB GIFS "${CMAKE_CURRENT_SOURCE_DIR}/gifs/*.gif")
 file(GLOB FONTES "${CMAKE_CURRENT_SOURCE_DIR}/fonts/*.ttf")
 # Os avisos do pomodoro na voz da Francisca (ADPCM, feitos pelo Hermes): tocam no zero, sem internet.

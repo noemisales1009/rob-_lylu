@@ -1,0 +1,37 @@
+{
+  "voz": "pt-BR-FranciscaNeural",
+  "ritmo": "-5%",
+  "tom": "-2Hz",
+  "taxa_hz": 16000,
+  "canais": 1,
+  "pcm_bits": 16,
+  "arquivos": {
+    "pausa_5min": {
+      "texto": "Pausa de 5 minutos, Mica. Bebe uma água e dá uma alongada.",
+      "duracao_ms": 5448,
+      "wav_bytes": 174380,
+      "adpcm_bytes": 43588,
+      "adpcm_formato": "ima_adpcm_16000; header 4 bytes: predictor int16 LE, index uint8, reserved uint8; nibbles low-first",
+      "sha256_adpcm": "e2c0bcf713aa5ffca639af3e7a4eacb49b982cdf55f8951867cff72d2eabe10b",
+      "decodificado_ms": 5448
+    },
+    "pausa_20min": {
+      "texto": "Pausa de 20 minutos, Mica. Bebe uma água e dá uma alongada.",
+      "duracao_ms": 5424,
+      "wav_bytes": 173612,
+      "adpcm_bytes": 43396,
+      "adpcm_formato": "ima_adpcm_16000; header 4 bytes: predictor int16 LE, index uint8, reserved uint8; nibbles low-first",
+      "sha256_adpcm": "5dd411d553d4a7870659c5f9132c7eb992d59365de4ee0e6581781e22058438d",
+      "decodificado_ms": 5424
+    },
+    "pausa_fim": {
+      "texto": "A pausa acabou, Mica. Volta quando estiver pronta.",
+      "duracao_ms": 4392,
+      "wav_bytes": 140588,
+      "adpcm_bytes": 35140,
+      "adpcm_formato": "ima_adpcm_16000; header 4 bytes: predictor int16 LE, index uint8, reserved uint8; nibbles low-first",
+      "sha256_adpcm": "65344299ef9cbefb955bd8c36fc07e041fee672eceb48bd4fa85ad01e75e4975",
+      "decodificado_ms": 4392
+    }
+  }
+}

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <meta name="theme-color" content="#112119" />
+    <link rel="icon" type="image/png" href="/lylu-rosto.png" />
+    <title>Lylu</title>
+    <link rel="stylesheet" href="/src/estilo.css" />
+  </head>
+  <body>
+    <header class="topo">
+      <img class="rosto" src="/lylu-rosto.png" alt="" />
+      <div>
+        <h1>Lylu</h1>
+        <p>fala com o Hermes · responde aqui e na placa</p>
+      </div>
+    </header>
+
+    <nav class="abas" aria-label="Telas do app">
+      <button id="aba-conversa" class="aba" type="button" aria-pressed="true">Conversa</button>
+      <button id="aba-lista" class="aba" type="button" aria-pressed="false">Lista</button>
+    </nav>
+
+    <section id="personagem" class="personagem" aria-label="Lylu">
+      <div class="personagem-desenho">
+        <img class="personagem-reserva" src="/lylu-conversa-poster.webp" alt="" />
+        <canvas id="lylu-animacao" width="512" height="512" role="img" aria-label="Lylu conversando e gesticulando"></canvas>
+      </div>
+      <p id="lylu-estado" class="personagem-estado" role="status"></p>
+    </section>
+
+    <main id="conversa" class="conversa" aria-live="polite">
+      <div id="conversa-topo" class="conversa-topo" hidden>
+        <button id="ver-antes" class="link" type="button">ver conversas de antes</button>
+        <button id="limpar" class="link" type="button">Limpar</button>
+      </div>
+      <section id="vazio" class="vazio">
+        <p>Escreve ou grava um áudio aqui embaixo que eu levo pro Hermes.<br />A resposta aparece na minha tela.</p>
+      </section>
+      <ol id="lista" class="lista"></ol>
+    </main>
+
+    <main id="tela-lista" class="tela-lista" hidden>
+      <div class="tipo-lista" role="group" aria-label="O que você vai anotar">
+        <button id="tipo-tarefa" class="tipo" type="button" aria-pressed="true">
+          <strong>Tarefa</strong><span>pra fazer sentada</span>
+        </button>
+        <button id="tipo-lembrete" class="tipo" type="button" aria-pressed="false">
+          <strong>Lembrete</strong><span>ir, comprar, ligar</span>
+        </button>
+        <button id="tipo-habito" class="tipo" type="button" aria-pressed="false">
+          <strong>Hábito</strong><span>todo dia</span>
+        </button>
+      </div>
+      <div id="quando" class="quando" hidden>
+        <span class="rotulo">Quando?</span>
+        <div class="chips" role="group" aria-label="Dia">
+          <button class="chip" type="button" data-dia="hoje">Hoje</button>
+          <button class="chip" type="button" data-dia="amanha">Amanhã</button>
+        </div>
+        <div class="chips" role="group" aria-label="Turno">
+          <button class="chip" type="button" data-turno="manha">Manhã</button>
+          <button class="chip" type="button" data-turno="tarde">Tarde</button>
+          <button class="chip" type="button" data-turno="noite">Noite</button>
+        </div>
+      </div>
+      <form id="novo-item" class="novo-item">
+        <input id="item-texto" type="text" maxlength="200" autocomplete="off" enterkeyhint="done" />
+        <button class="redondo" type="submit" aria-label="Pôr na lista">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z" /></svg>
+        </button>
+      </form>
+      <ul id="itens-lista" class="itens-lista"></ul>
+      <p id="itens-vazio" class="itens-vazio"></p>
+      <button id="mandar-lista" class="botao botao-largo" type="button" disabled>Mandar pro Hermes</button>
+    </main>
+
+    <p id="aviso" class="aviso" role="status" hidden></p>
+
+    <form id="caixa" class="caixa">
+      <textarea id="texto" rows="1" maxlength="4000" placeholder="Escreve pro Hermes…" aria-label="Mensagem para o Hermes"></textarea>
+      <button id="falar" class="redondo" type="button" aria-label="Gravar áudio">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-3.1a7 7 0 0 0 6-6.9z" /></svg>
+      </button>
+      <button id="enviar" class="redondo" type="submit" aria-label="Enviar" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-2.5-6.5z" /></svg>
+      </button>
+    </form>
+
+    <div id="gravando" class="caixa gravando" hidden>
+      <button id="cancelar" class="redondo apagado" type="button" aria-label="Cancelar o áudio">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19l5.6-5.6 5.6 5.6 1.4-1.4-5.6-5.6L19 6.4 17.6 5 12 10.6z" /></svg>
+      </button>
+      <div class="ouvindo">
+        <span class="ponto" aria-hidden="true"></span>
+        <span>Estou te ouvindo…</span>
+        <span id="tempo" class="tempo">0:00</span>
+      </div>
+      <button id="mandar-audio" class="redondo" type="button" aria-label="Enviar o áudio">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l16-8-6 16-2.5-6.5z" /></svg>
+      </button>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

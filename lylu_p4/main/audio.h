@@ -44,3 +44,6 @@ int16_t *audio_pega_gravacao(size_t *amostras);
 void audio_tocar(int16_t *pcm, size_t amostras);
 void audio_calar(void);              // corta o que estiver tocando
 bool audio_falando(void);
+// Abertura da boca pelo PCM que está saindo: 0 fechada, 1..3 falando.
+// Não usa o microfone; ouvir a Noemi não faz a Lylu mexer a boca.
+int audio_boca(void);

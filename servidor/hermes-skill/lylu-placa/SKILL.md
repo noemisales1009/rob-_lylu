@@ -65,7 +65,7 @@ que você já deu hoje (olhe `hermes_falou` antes de um `falar` espontâneo).
 | O que | Comando |
 |---|---|
 | A Lylu falar (balão + voz) | `falar "Bora beber água?" [--forte "segunda linha"] [--humor cuidadora] [--sem-voz]` |
-| Humor na barra de cima | `humor brincalhona [--minutos 60]` |
+| Humor (não aparece mais na tela; vai no `estado`) | `humor brincalhona [--minutos 60]` |
 | Missão do dia e bônus (substitui as listas) | `tarefas --missao "A" --missao "B" --bonus "C"` |
 | Guardar o id do Todoist junto | `tarefas --missao "8812345::Enviar orçamento"` |
 | Marcar / desmarcar tarefa | `marcar "Tomar o remédio"` · `marcar 8812345 --desfazer` |
@@ -73,12 +73,24 @@ que você já deu hoje (olhe `hermes_falou` antes de um `falar` espontâneo).
 | Apagar recado | `recado-apagar "Dentista"` (id ou título) · `recados-limpar` |
 | Pomodoro | `pomodoro iniciar --tarefa "Relatório" --minutos 25` · `pomodoro pausar` · `pomodoro continuar` · `pomodoro parar` |
 | Tempos guardados do pomodoro | `pomodoro-config --foco 25 --curta 5 --blocos 4 --longa 20` |
-| Mostrar uma tela | `tela Tarefas` (Foco, Tarefas, Recados, Semana, Relógio, Cantinho, Ajustes) |
+| Mostrar uma tela | `tela Tarefas` (Início, Foco, Tarefas, Recados, Semana, Relógio, Hábitos, Ajustes) |
+| Hábitos (troca a lista, até 6) | `habitos "Beber água" "Tomar o remédio" "Caminhar"` · sem nada, limpa |
+| Marcar um hábito de hoje | `marcar "Beber água"` · `marcar "Beber água" --desfazer` |
 | Modo dia difícil | `dia-dificil on` · `dia-dificil off` |
 
 Humores válidos: comemorando, animada, cuidadora, brincalhona, alertando,
 julgadora, entediada, descansando. No modo dia difícil a placa ignora
 julgadora e alertando.
+
+## Hábitos
+
+A aba Hábitos mostra o que a Mica quer fazer todo dia: caixinha de hoje, as
+bolinhas da semana e a sequência. O comando `habitos` **troca a lista inteira**:
+para acrescentar um, veja `habitos` no `estado` e mande todos. Os que continuam
+guardam a sequência. Hábito é repetido todo dia; o que é de uma vez só é tarefa
+ou lembrete. Às 5h a placa vira o dia sozinha: não há nada para você zerar.
+Quando ela marca na placa, chega `habito_feito` / `habito_desfeito` com
+`sequencia`. Na dúvida, `SILENCIO`; vale comentar uma sequência bonita (7, 30 dias).
 
 ## Regras da Lylu (valem aqui também)
 

@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lylu_bridge  # noqa: E402
 import lylu_voz  # noqa: E402
 
-TELAS = ("Foco", "Tarefas", "Recados", "Semana", "Relógio", "Cantinho", "Ajustes")
+TELAS = ("Início", "Foco", "Tarefas", "Recados", "Semana", "Relógio", "Hábitos", "Ajustes")
 BRASILIA = timezone(timedelta(hours=-3))      # sem horário de verão desde 2019
 LEITURAS = ("estado", "listas", "historico")  # só leem; não mandam nada para a placa
 
@@ -75,6 +75,8 @@ def monta(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
             return "estado", {"tarefas": dados}
         return "estado", {"tarefas": {"missao": [tarefa(t) for t in args.missao or []],
                                       "bonus": [tarefa(t) for t in args.bonus or []]}}
+    if c == "habitos":
+        return "estado", {"habitos": [tarefa(t) for t in args.habito]}
     if c == "marcar":
         return "estado", {"marcar": {"alvo": args.alvo, "f": not args.desfazer}}
     if c == "recado":
@@ -130,7 +132,7 @@ def main() -> None:
     s.add_argument("--humor", choices=lylu_bridge.HUMORES)
     s.add_argument("--sem-voz", action="store_true", help="só o balão, sem áudio")
 
-    s = sub.add_parser("humor", help="muda o humor que aparece na barra de cima")
+    s = sub.add_parser("humor", help="muda o humor da Lylu (vai no estado; não aparece mais na tela)")
     s.add_argument("nome", choices=lylu_bridge.HUMORES)
     s.add_argument("--minutos", type=int, default=60, help="por quanto tempo (padrão 60)")
 
@@ -139,8 +141,11 @@ def main() -> None:
     s.add_argument("--bonus", action="append", help="até 6; repita a opção. Aceita 'id::texto'")
     s.add_argument("--json", help='JSON ou arquivo: {"missao":[{"id","t","f"}],"bonus":[...]}')
 
-    s = sub.add_parser("marcar", help="marca (ou desmarca) uma tarefa como feita")
-    s.add_argument("alvo", help="o id ou o texto da tarefa")
+    s = sub.add_parser("habitos", help="troca a lista de hábitos (até 6); os que continuam guardam a sequência")
+    s.add_argument("habito", nargs="*", help="um por argumento; sem nenhum, limpa a lista. Aceita 'id::texto'")
+
+    s = sub.add_parser("marcar", help="marca (ou desmarca) uma tarefa ou um hábito como feito")
+    s.add_argument("alvo", help="o id ou o texto da tarefa ou do hábito")
     s.add_argument("--desfazer", action="store_true")
 
     s = sub.add_parser("recado", help="acrescenta (ou atualiza, pelo id) um recado")

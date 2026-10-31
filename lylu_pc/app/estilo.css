@@ -1,0 +1,224 @@
+/* Mesmas cores da tela da Lylu (lylu_p4/main/main.c) e do app do celular. */
+:root {
+  --fundo: #112119;
+  --cartao: #182d25;
+  --balao: #1f3a30;
+  --linha: #2b4a3e;
+  --tinta: #eef3ec;
+  --fraco: #93a99c;
+  --oliva: #bfd384;
+  --ambar: #f4b860;
+  --ceu: #8ec5ff;
+  --escuro: #1b2612;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: transparent; /* a janela é transparente; só o cartão aparece */
+  overflow: hidden;
+  user-select: none;
+  font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  color: var(--tinta);
+}
+
+/* O cartão inteiro arrasta a janela; botões e campos continuam clicáveis. */
+.cartao {
+  position: absolute;
+  inset: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px 14px 12px;
+  border-radius: 20px;
+  background: var(--fundo);
+  border: 1px solid var(--linha);
+  box-shadow: 0 2px 6px rgb(0 0 0 / 0.35);
+  -webkit-app-region: drag;
+}
+button, input, label, .recentes li, .cuidados li { -webkit-app-region: no-drag; }
+
+.barra {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+}
+.titulo { flex: 1; font-size: 12px; color: var(--fraco); }
+.icone {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--fraco);
+  cursor: pointer;
+}
+.icone:hover { background: var(--cartao); color: var(--tinta); }
+.icone svg { width: 16px; height: 16px; fill: currentColor; }
+
+.lylu { width: 136px; height: 136px; flex: none; }
+.lylu canvas { width: 100%; height: 100%; }
+
+.fala {
+  margin: 2px 0 6px;
+  min-height: 20px;
+  max-width: 100%;
+  text-align: center;
+  color: var(--tinta);
+  font-size: 13px;
+}
+.fala.forte { color: var(--oliva); font-weight: 600; }
+
+.tela { align-self: stretch; display: flex; flex-direction: column; align-items: center; }
+
+.rotulo { margin: 0; font-size: 12px; color: var(--fraco); }
+.tempo {
+  margin: 0;
+  font-size: 44px;
+  font-weight: 300;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+}
+.pausa .tempo { color: var(--ceu); }
+.trilho { width: 100%; height: 4px; margin: 6px 0 4px; border-radius: 99px; background: var(--cartao); overflow: hidden; }
+.progresso { height: 100%; width: 0; background: var(--oliva); border-radius: 99px; transition: width 300ms linear; }
+.pausa .progresso { background: var(--ceu); }
+.link {
+  margin: -6px 0 8px;
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  color: var(--oliva);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.link:hover { text-decoration: underline; }
+body.cheia .link { font-size: 15px; margin-bottom: 14px; }
+
+.feitas { list-style: none; margin: 0; padding: 0; align-self: stretch; }
+.feitas li {
+  padding: 2px 0 2px 12px;
+  color: var(--fraco);
+  white-space: nowrap;
+}
+.feitas li span { text-decoration: line-through; }
+
+.tarefa-atual {
+  margin: 2px 0 8px;
+  max-width: 100%;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.botoes { display: flex; gap: 8px; }
+.botao {
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 99px;
+  background: var(--oliva);
+  color: var(--escuro);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.botao:hover { filter: brightness(1.08); }
+.botao.apagado { background: var(--balao); color: var(--tinta); border: 1px solid var(--linha); }
+
+.linha { align-self: stretch; display: flex; gap: 6px; }
+.linha input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 12px;
+  border-radius: 99px;
+  border: 1px solid var(--linha);
+  background: var(--cartao);
+  color: var(--tinta);
+  font: inherit;
+  user-select: text;
+}
+.linha input::placeholder { color: var(--fraco); }
+.linha input:focus, .botao:focus-visible, .icone:focus-visible { outline: 2px solid var(--oliva); outline-offset: 1px; }
+
+#t-escolher .rotulo { align-self: flex-start; margin: 12px 4px 4px; }
+.recentes { list-style: none; margin: 0; padding: 0; align-self: stretch; display: flex; flex-direction: column; gap: 4px; }
+.recentes li {
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: var(--cartao);
+  border: 1px solid var(--linha);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recentes li:hover { border-color: var(--oliva); }
+
+/* Recentes e concluídas: o texto e um × para apagar, que acende no hover. */
+.recentes li, .feitas li { display: flex; align-items: center; gap: 4px; }
+.recentes li span, .feitas li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.apaga { width: 22px; height: 22px; flex: none; font-size: 16px; opacity: 0.45; }
+li:hover .apaga, .apaga:focus-visible { opacity: 1; }
+
+.cuidados { list-style: none; margin: 0 0 8px; padding: 0; display: flex; gap: 4px; }
+.cuidados li {
+  padding: 3px 10px;
+  white-space: nowrap;
+  border-radius: 99px;
+  border: 1px solid var(--linha);
+  font-size: 12px;
+  color: var(--fraco);
+  cursor: pointer;
+}
+.cuidados li.escolhido { border-color: var(--ceu); color: var(--tinta); }
+
+.ajustes { list-style: none; margin: 0 0 6px; padding: 0; align-self: stretch; }
+.ajustes li { display: flex; align-items: center; gap: 6px; padding: 5px 0; border-bottom: 1px solid var(--linha); }
+.ajustes .nome { flex: 1; font-size: 13px; }
+.ajustes .valor { min-width: 52px; text-align: center; font-variant-numeric: tabular-nums; }
+.ajustes .icone { border: 1px solid var(--linha); }
+.chave { align-self: stretch; display: flex; align-items: center; gap: 8px; padding: 4px 2px; font-size: 13px; cursor: pointer; }
+.chave input { accent-color: #bfd384; }
+#b-pronto { margin-top: 8px; }
+
+.blocos { margin: auto 0 0; padding-top: 6px; font-size: 12px; color: var(--fraco); }
+
+/* Pausa em tela cheia: a Lylu grande no meio, sem barra e sem arrastar. */
+body.cheia .cartao {
+  inset: 0;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  -webkit-app-region: no-drag;
+}
+body.cheia .blocos, body.cheia .titulo, body.cheia #b-ajustes { display: none; }
+/* Minimizar e fechar continuam ali no canto, como numa janela normal. */
+body.cheia .barra { position: absolute; top: 12px; right: 16px; }
+body.cheia .lylu { width: min(320px, 38vh); height: min(320px, 38vh); }
+body.cheia .fala { font-size: 22px; min-height: 32px; }
+body.cheia .tela { align-self: center; width: min(560px, 90vw); }
+body.cheia .rotulo { font-size: 16px; }
+body.cheia .tempo { font-size: 120px; }
+body.cheia .trilho { height: 6px; margin: 10px 0; }
+body.cheia .tarefa-atual { font-weight: 400; color: var(--fraco); }
+body.cheia .cuidados { margin: 6px 0 18px; gap: 10px; }
+body.cheia .cuidados li { font-size: 16px; padding: 6px 18px; }
+body.cheia .botao { font-size: 16px; padding: 10px 22px; }
+
+/* Segurar 3 s para sair da pausa: dá trabalho de propósito, mas nunca prende. */
+.segura { position: relative; overflow: hidden; }
+.segura > span:last-child { position: relative; }
+.segura .enche { position: absolute; inset: 0; width: 0; background: rgb(191 211 132 / 0.35); }
+.segura.segurando .enche { width: 100%; transition: width 3s linear; }

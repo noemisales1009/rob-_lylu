@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'" />
+    <title>Lylu Foco</title>
+    <link rel="stylesheet" href="estilo.css" />
+  </head>
+  <body>
+    <main id="cartao" class="cartao">
+      <div class="barra">
+        <span class="titulo">Lylu Foco</span>
+        <button id="b-ajustes" class="icone" type="button" title="Ajustes" aria-label="Ajustes">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3h-4l-.3 2.9a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1L11 21h4l.3-2.9a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg>
+        </button>
+        <button id="b-esconder" class="icone" type="button" title="Esconder (ela fica perto do relógio do Windows)" aria-label="Esconder">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 11h14v2H5z"/></svg>
+        </button>
+        <button id="b-fechar" class="icone" type="button" title="Fechar (o relógio continua de onde parou)" aria-label="Fechar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19l5.6-5.6 5.6 5.6 1.4-1.4-5.6-5.6L19 6.4 17.6 5 12 10.6z"/></svg>
+        </button>
+      </div>
+
+      <div class="lylu"><canvas id="lylu" width="480" height="480" role="img" aria-label="Lylu"></canvas></div>
+      <p id="fala" class="fala" role="status"></p>
+
+      <section id="t-escolher" class="tela">
+        <form id="f-tarefa" class="linha">
+          <input id="tarefa" maxlength="80" placeholder="Escreve a tarefa…" autocomplete="off" aria-label="Tarefa" />
+          <button class="botao" type="submit">Começar</button>
+        </form>
+        <p id="rot-recentes" class="rotulo">Recentes</p>
+        <ul id="recentes" class="recentes"></ul>
+        <p id="rot-feitas" class="rotulo">Concluídas hoje</p>
+        <ul id="feitas" class="feitas"></ul>
+      </section>
+
+      <section id="t-relogio" class="tela">
+        <p id="nome-fase" class="rotulo"></p>
+        <p id="tempo" class="tempo">25:00</p>
+        <div class="trilho"><div id="progresso" class="progresso"></div></div>
+        <p id="tarefa-atual" class="tarefa-atual"></p>
+        <button id="b-concluir" class="link" type="button">✓ Marcar como concluída</button>
+        <ul id="cuidados" class="cuidados"></ul>
+        <div class="botoes">
+          <button id="b-principal" class="botao" type="button"></button>
+          <button id="b-secundario" class="botao apagado" type="button"></button>
+          <button id="b-segura" class="botao apagado segura" type="button" hidden>
+            <span class="enche" aria-hidden="true"></span><span>Segure 3 s para voltar</span>
+          </button>
+        </div>
+      </section>
+
+      <section id="t-ajustes" class="tela">
+        <ul id="lista-ajustes" class="ajustes"></ul>
+        <label class="chave"><input type="checkbox" id="a-sozinha" /> Avançar sozinha</label>
+        <label class="chave"><input type="checkbox" id="a-som" /> Som quando o tempo acaba</label>
+        <label class="chave"><input type="checkbox" id="a-cheia" /> Pausa em tela cheia (pra levantar)</label>
+        <label class="chave"><input type="checkbox" id="a-windows" /> Abrir quando o Windows ligar</label>
+        <button id="b-pronto" class="botao" type="button">Pronto</button>
+      </section>
+
+      <p id="blocos" class="blocos"></p>
+    </main>
+    <script type="module" src="pomodoro.js"></script>
+  </body>
+</html>

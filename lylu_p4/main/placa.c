@@ -21,7 +21,11 @@ static const char *TAG = "placa";
 
 static i2c_master_bus_handle_t barramento;
 
-#define PINO_LCD_RESET   5
+// Esta placa é a V2 (lote de 2026, outro painel): o reset da tela é o GPIO0, pino 4 do
+// FPC1 no esquema JC1060P470C_I_W_Y. O GPIO5 do espcontrol é da primeira versão; com ele
+// a tela não zerava quando a placa reiniciava sem perder energia, que é a suspeita do
+// tremor logo depois de gravar (28/10 e 31/10/2026).
+#define PINO_LCD_RESET   0
 #define PINO_LUZ         23
 #define PINO_I2C_SDA     7
 #define PINO_I2C_SCL     8

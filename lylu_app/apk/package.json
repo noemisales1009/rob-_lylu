@@ -1,0 +1,13 @@
+{
+  "name": "lylu-apk",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Embrulho Android (Capacitor) do app da Lylu. O código fica em Documents/Robô Lylu/rob-_lylu/lylu_app; aqui só entra o dist/ dele.",
+  "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/core": "8.5.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.2"
+  }
+}

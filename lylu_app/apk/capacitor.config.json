@@ -1,0 +1,14 @@
+{
+  "appId": "br.noemi.lylu",
+  "appName": "Lylu",
+  "webDir": "dist",
+  "android": {
+    "backgroundColor": "#112119"
+  },
+  "plugins": {
+    "SystemBars": {
+      "style": "DARK",
+      "initialViewportFitValueHint": "cover"
+    }
+  }
+}
